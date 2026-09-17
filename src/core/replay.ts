@@ -1,4 +1,10 @@
-import { parseScenario, type Delivery, type OrderEvent, type OrderStatus, type Scenario } from './schema';
+import {
+  parseScenario,
+  type Delivery,
+  type OrderEvent,
+  type OrderStatus,
+  type Scenario,
+} from './schema';
 
 export const MAX_ATTEMPTS = 3;
 export const RETRY_DELAYS_MS = [1000, 2000] as const;
@@ -92,14 +98,24 @@ type Disposition = { decision: Exclude<ConsumerDecision, 'not-received'>; reason
 
 /** Fixed field order gives semantic equality without a collision-prone short hash. */
 function fingerprint(event: OrderEvent): string {
-  return JSON.stringify([event.orderId, event.revision, event.status, event.totalCents, new Date(event.occurredAt).toISOString()]);
+  return JSON.stringify([
+    event.orderId,
+    event.revision,
+    event.status,
+    event.totalCents,
+    new Date(event.occurredAt).toISOString(),
+  ]);
 }
 
 function snapshot(event: OrderEvent): OrderSnapshot {
   return {
-    orderId: event.orderId, revision: event.revision, status: event.status,
-    totalCents: event.totalCents, occurredAt: new Date(event.occurredAt).toISOString(),
-    eventId: event.eventId, recordId: event.recordId,
+    orderId: event.orderId,
+    revision: event.revision,
+    status: event.status,
+    totalCents: event.totalCents,
+    occurredAt: new Date(event.occurredAt).toISOString(),
+    eventId: event.eventId,
+    recordId: event.recordId,
   };
 }
 
@@ -112,8 +128,23 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
   const effects: SimulatedEffect[] = [];
   const attempts: DeliveryAttempt[] = [];
   const deadLetters: DeadLetter[] = [];
-  const metrics: ReplayMetrics = { received: 0, attempts: 0, applied: 0, duplicates: 0, stale: 0, conflicts: 0, deadLetters: 0, sideEffects: 0, duplicateEffects: 0 };
-  const queue: ScheduledAttempt[] = scenario.deliveries.map((delivery, ordinal) => ({ delivery, ordinal, attempt: 1, timeMs: delivery.atMs }));
+  const metrics: ReplayMetrics = {
+    received: 0,
+    attempts: 0,
+    applied: 0,
+    duplicates: 0,
+    stale: 0,
+    conflicts: 0,
+    deadLetters: 0,
+    sideEffects: 0,
+    duplicateEffects: 0,
+  };
+  const queue: ScheduledAttempt[] = scenario.deliveries.map((delivery, ordinal) => ({
+    delivery,
+    ordinal,
+    attempt: 1,
+    timeMs: delivery.atMs,
+  }));
   let nextOrdinal = queue.length;
 
   function consume(event: OrderEvent, scheduled: ScheduledAttempt): Disposition {
@@ -121,25 +152,42 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
       const content = fingerprint(event);
       const knownEvent = seenEvents.get(event.eventId);
       if (knownEvent !== undefined && knownEvent !== content) {
-        return { decision: 'conflict', reason: 'Quarantined: this event ID was already received with different semantic content.' };
+        return {
+          decision: 'conflict',
+          reason:
+            'Quarantined: this event ID was already received with different semantic content.',
+        };
       }
       seenEvents.set(event.eventId, content);
       const revisions = seenRevisions.get(event.orderId) ?? new Map<number, string>();
       const knownRevision = revisions.get(event.revision);
       if (knownRevision !== undefined && knownRevision !== content) {
-        return { decision: 'conflict', reason: 'Quarantined: the same order revision has conflicting snapshot content.' };
+        return {
+          decision: 'conflict',
+          reason: 'Quarantined: the same order revision has conflicting snapshot content.',
+        };
       }
       revisions.set(event.revision, content);
       seenRevisions.set(event.orderId, revisions);
       if (knownEvent !== undefined) {
-        return { decision: 'duplicate', reason: 'Ignored: this event ID and semantic content were already received.' };
+        return {
+          decision: 'duplicate',
+          reason: 'Ignored: this event ID and semantic content were already received.',
+        };
       }
       const current = orders.get(event.orderId);
       if (current && event.revision < current.revision) {
-        return { decision: 'stale', reason: 'Ignored: this full snapshot is older than the current order revision.' };
+        return {
+          decision: 'stale',
+          reason: 'Ignored: this full snapshot is older than the current order revision.',
+        };
       }
       if (current && event.revision === current.revision) {
-        return { decision: 'duplicate', reason: 'Ignored: this identical order revision is already applied under another event ID.' };
+        return {
+          decision: 'duplicate',
+          reason:
+            'Ignored: this identical order revision is already applied under another event ID.',
+        };
       }
     }
 
@@ -147,12 +195,21 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
     const effectKey = JSON.stringify([event.orderId, event.revision]);
     if (effectKeys.has(effectKey)) metrics.duplicateEffects++;
     effectKeys.add(effectKey);
-    effects.push({ key: effectKey, deliveryId: scheduled.delivery.id, eventId: event.eventId, orderId: event.orderId, revision: event.revision, status: event.status, timeMs: scheduled.timeMs });
+    effects.push({
+      key: effectKey,
+      deliveryId: scheduled.delivery.id,
+      eventId: event.eventId,
+      orderId: event.orderId,
+      revision: event.revision,
+      status: event.status,
+      timeMs: scheduled.timeMs,
+    });
     return {
       decision: 'applied',
-      reason: strategy === 'naive'
-        ? 'Applied every received snapshot and emitted a simulated effect, without deduplication or revision checks.'
-        : 'Applied a newer full snapshot and atomically recorded its single simulated outbox effect.',
+      reason:
+        strategy === 'naive'
+          ? 'Applied every received snapshot and emitted a simulated effect, without deduplication or revision checks.'
+          : 'Applied a newer full snapshot and atomically recorded its single simulated outbox effect.',
     };
   }
 
@@ -161,11 +218,21 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
     const scheduled = queue.shift()!;
     const event = records.get(scheduled.delivery.recordId)!;
     const fault = scheduled.delivery.fault;
-    const transport: TransportOutcome = fault === 'unavailable' ? 'unavailable'
-      : scheduled.attempt === 1 && fault !== 'none' ? fault : 'acknowledged';
+    const transport: TransportOutcome =
+      fault === 'unavailable'
+        ? 'unavailable'
+        : scheduled.attempt === 1 && fault !== 'none'
+          ? fault
+          : 'acknowledged';
     let disposition: { decision: ConsumerDecision; reason: string };
     if (transport === 'timeout-before' || transport === 'unavailable') {
-      disposition = { decision: 'not-received', reason: transport === 'unavailable' ? 'The simulated endpoint is unavailable; the consumer received nothing.' : 'The first attempt timed out before reaching the simulated consumer.' };
+      disposition = {
+        decision: 'not-received',
+        reason:
+          transport === 'unavailable'
+            ? 'The simulated endpoint is unavailable; the consumer received nothing.'
+            : 'The first attempt timed out before reaching the simulated consumer.',
+      };
     } else {
       metrics.received++;
       disposition = consume(event, scheduled);
@@ -173,19 +240,39 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
       else if (disposition.decision === 'duplicate') metrics.duplicates++;
       else if (disposition.decision === 'stale') metrics.stale++;
       else if (disposition.decision === 'conflict') metrics.conflicts++;
-      if (transport === 'timeout-after') disposition.reason += ' Processing completed, but its acknowledgement was lost.';
+      if (transport === 'timeout-after')
+        disposition.reason += ' Processing completed, but its acknowledgement was lost.';
     }
     attempts.push({
-      deliveryId: scheduled.delivery.id, recordId: event.recordId, eventId: event.eventId,
-      orderId: event.orderId, revision: event.revision, attempt: scheduled.attempt,
-      timeMs: scheduled.timeMs, transport, ...disposition,
+      deliveryId: scheduled.delivery.id,
+      recordId: event.recordId,
+      eventId: event.eventId,
+      orderId: event.orderId,
+      revision: event.revision,
+      attempt: scheduled.attempt,
+      timeMs: scheduled.timeMs,
+      transport,
+      ...disposition,
     });
 
     if (transport !== 'acknowledged') {
       if (scheduled.attempt < MAX_ATTEMPTS) {
-        queue.push({ delivery: scheduled.delivery, attempt: scheduled.attempt + 1, timeMs: scheduled.timeMs + RETRY_DELAYS_MS[scheduled.attempt - 1], ordinal: nextOrdinal++ });
+        queue.push({
+          delivery: scheduled.delivery,
+          attempt: scheduled.attempt + 1,
+          timeMs: scheduled.timeMs + RETRY_DELAYS_MS[scheduled.attempt - 1],
+          ordinal: nextOrdinal++,
+        });
       } else {
-        deadLetters.push({ deliveryId: scheduled.delivery.id, recordId: event.recordId, eventId: event.eventId, attempts: scheduled.attempt, lastTimeMs: scheduled.timeMs, reason: 'Retry limit reached without acknowledgement. This delivery was placed in the simulated dead-letter queue.' });
+        deadLetters.push({
+          deliveryId: scheduled.delivery.id,
+          recordId: event.recordId,
+          eventId: event.eventId,
+          attempts: scheduled.attempt,
+          lastTimeMs: scheduled.timeMs,
+          reason:
+            'Retry limit reached without acknowledgement. This delivery was placed in the simulated dead-letter queue.',
+        });
       }
     }
   }
@@ -194,25 +281,45 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
   metrics.deadLetters = deadLetters.length;
   metrics.sideEffects = effects.length;
   return {
-    id: strategy, name: strategy === 'naive' ? 'Apply every delivery' : 'Dedupe + revision guard',
-    attempts, effects, deadLetters, metrics,
-    finalOrders: [...orders.values()].sort((a, b) => a.orderId < b.orderId ? -1 : a.orderId > b.orderId ? 1 : 0),
+    id: strategy,
+    name: strategy === 'naive' ? 'Apply every delivery' : 'Dedupe + revision guard',
+    attempts,
+    effects,
+    deadLetters,
+    metrics,
+    finalOrders: [...orders.values()].sort((a, b) =>
+      a.orderId < b.orderId ? -1 : a.orderId > b.orderId ? 1 : 0,
+    ),
   };
 }
 
-/** Runs both consumers on an identical virtual schedule, with no I/O or real waits. */
-export function replayScenario(input: Scenario): ReplayResult {
+/** Validates once and returns both the accepted input and its computed replay. */
+export function createReplay(input: unknown): { scenario: Scenario; result: ReplayResult } {
   const scenario = parseScenario(input);
-  return {
-    schemaVersion: 1, engineVersion: '1.0.0', scenarioId: scenario.id, scenarioTitle: scenario.title,
-    origin: scenario.origin, mode: 'simulation',
+  const result: ReplayResult = {
+    schemaVersion: 1,
+    engineVersion: '1.0.0',
+    scenarioId: scenario.id,
+    scenarioTitle: scenario.title,
+    origin: scenario.origin,
+    mode: 'simulation',
     strategies: [runStrategy(scenario, 'naive'), runStrategy(scenario, 'robust')],
     warnings: [
       'This is a deterministic delivery simulation. It makes no outbound requests and generates no real business effects.',
       'Events are complete order snapshots. Higher revisions may skip gaps; this model is not safe for deltas or missing incremental updates.',
       'The robust model assumes atomic state, dedupe and outbox writes. It does not test a real database, concurrent workers or an external connector.',
       'Faults and timestamps are supplied scenario inputs. Results are not production reliability measurements or proof of exactly-once external delivery.',
-      ...(scenario.origin === 'fixture' ? ['This authored fixture illustrates a failure case; it is not a captured production incident.'] : []),
+      ...(scenario.origin === 'fixture'
+        ? [
+            'This authored fixture illustrates a failure case; it is not a captured production incident.',
+          ]
+        : []),
     ],
   };
+  return { scenario, result };
+}
+
+/** Runs both consumers on an identical virtual schedule, with no I/O or real waits. */
+export function replayScenario(input: Scenario): ReplayResult {
+  return createReplay(input).result;
 }

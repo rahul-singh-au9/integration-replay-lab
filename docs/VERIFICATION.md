@@ -1,52 +1,66 @@
 # Verification record
 
-Date: 2026-09-17. Scope: local release candidate on macOS ARM64, Node 24.21.0, Chromium 153 through Playwright 1.63.0, Wrangler 4.133.0 with local D1 and native rate-limit bindings.
+Date: 2026-09-17. Environment: Node 24.21.0, TypeScript 6.0.3, Playwright 1.63.0, Wrangler 4.133.0. Local testing used macOS ARM64 and isolated Worker/D1 instances. Public verification uses the owned HTTPS deployment and synthetic records only.
 
-**Implemented and locally verified. Not deployed.** Cloudflare authentication is unavailable, the remote database ID is a placeholder, and the GitHub publishing account is unresolved. No public URL, remote database, or hosted CI result is claimed.
+The application is deployed at [Integration Replay Lab](https://integration-replay-lab.rahulsg1508.workers.dev). Release verification is in progress; the first live maximum-scenario check returned correct results but exceeded the Workers Free CPU allowance. Functional HTTP success alone is not a performance acceptance result.
 
-## Executed checks
+## Executed local checks
 
-| Check | Result |
-| --- | --- |
-| Strict TypeScript | Passed |
-| Replay engine and API tests | 39 passed: 25 engine and 14 API |
-| Production frontend and CLI builds | Passed |
-| CLI process tests | 4 passed |
-| Chromium browser tests | 7 passed |
-| Dependency audit | 0 reported vulnerabilities at the time of checking |
-| Local D1 migration | Applied successfully |
-| Desktop/mobile visual review | Inspected replay, mobile navigation and import views; mobile at 390 px |
+| Check                                         | Result                                                         |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| Typed lint, formatting and strict TypeScript  | Passed                                                         |
+| Unit/API/client/import tests                  | 129 passed: 37 core, 56 API, 36 client/import                  |
+| Production frontend and CLI builds            | Passed                                                         |
+| CLI process tests                             | 9 passed                                                       |
+| Browser journeys                              | 39 passed: 13 each in Chromium, Firefox and WebKit; no retries |
+| Dependency audit                              | 0 known vulnerabilities reported at check time                 |
+| Local D1 migrations                           | Both applied successfully                                      |
+| Isolated backup/restore and scheduled cleanup | Passed                                                         |
+| Desktop/mobile recordings                     | Recorded, encoded, decoded and playback-checked                |
 
-Engine checks cover duplicate delivery, lost acknowledgement after a commit, stale revisions, event identity collisions, contradictory snapshots at the same revision, retry limits, deterministic ordering and strict input bounds. They inspect final snapshots, effects, attempts and dead letters rather than relying only on displayed counters.
+Coverage reporting for the selected core, API/client and Worker modules measured **98.70% lines, 98.08% statements, 95.42% branches and 100% functions**. This is not whole-application coverage: React components, CLI process code, fixtures and verification scripts are outside the configured coverage scope. Browser and process tests exercise those paths separately; no percentage proves absence of defects.
 
-API tests execute the migration, SQL statements and triggers in SQLite. They exercise private cookie sessions, owner isolation, cross-origin defenses, malformed input, streaming limits, retention, service failures and atomic capacity enforcement. The server computes results from the validated scenario; it does not trust uploaded results. Stored results retain their engine version when opened later. Browser tests independently exercise actual local Worker/D1 bindings.
+Core tests inspect snapshots, effects, attempts and dead letters for duplicate delivery, acknowledgement loss, stale revisions, conflicting identities, contradictory revisions, retry exhaustion, deterministic ordering and strict input bounds. Timestamp precision is bounded so canonicalization cannot silently discard submillisecond identity differences.
 
-CLI tests launch the built executable in a separate process and verify JSON output and exit status for a lost acknowledgement, retry exhaustion, an identity conflict, invalid input and an unknown option. They make no external requests.
+API tests execute SQL statements and migration triggers in SQLite. They cover owner isolation, cookie attributes, origin/fetch-metadata defenses, route/method responses, malformed and streaming input, byte/capacity limits, expired rows, storage failures, corrupt or unsupported saved results and safely escaped response serialization. The server recomputes replay results rather than trusting uploaded results. Browser journeys separately verify actual Worker/D1 bindings.
 
-Browser journeys verify server replay → export → local comparison → reload → open → delete. Exported server results match local computation. A separate browser cannot read or delete a known saved run. Other checks cover malformed JSON, unavailable storage, explicit unsaved local results, keyboard dialog focus, inert imported markup and long identifiers or amounts on mobile.
+Client/import tests cover successful-response validation, request deadlines, session coordination, malformed UTF-8 and bundles, and stale asynchronous responses. CLI tests launch the built executable and verify output/exit status, conflicts, dead letters, bounded regular-file reads, invalid encodings and refusal to read a named pipe.
 
-Accessibility checks use axe WCAG 2 A/AA and 2.1 AA rules. No serious or critical violations were found in the tested desktop/mobile replay views, method and JSON views, or import dialog. No horizontal page overflow was found at 390 px, including long identifiers and maximum integer amounts. Automated checks and limited keyboard review are not a comprehensive accessibility certification or screen-reader study.
+Browser journeys verify server replay → export → local comparison → reload → open → delete, plus cross-session isolation. Other journeys cover malformed input, unavailable storage, distinct unsaved local results, keyboard dialogs, mobile navigation, racing selections and inert imported markup. A real WebKit focus-return defect was corrected by preserving the opening button explicitly.
 
-## Measured local performance
+Automated axe checks found no serious or critical violations in the tested replay, method, JSON and import views. Manual desktop/mobile inspection covered hierarchy, wrapping, controls and error states. Tested long identifiers and maximum amounts do not overflow the 320 px layout. These checks do not constitute a comprehensive accessibility certification, screen-reader study or physical-device test.
 
-- A bounded stress scenario with **50 event records and 100 deliveries**, 64-character identifiers and maximum safe integer revisions/amounts evaluated in a median **0.840 ms** across 15 measurements. Input size was 35,728 bytes. The local regression threshold is 100 ms.
-- The mixed-fault output was **364,594 bytes** with 500 combined attempts across both strategies. Permanent unavailability produced **378,338 bytes**, 600 combined attempts and 200 combined dead letters. Both outputs fit within the 512 KiB persisted-result limit. These cases are stress examples, not a proof of the largest possible serialization; the API enforces the output limit independently.
-- Application JavaScript and CSS totaled **109,657 bytes gzip**, below the 250 KiB target.
-- The local browser usability check completed in **577 ms**, including a 500 ms network-idle observation. No third-party requests occurred. This is a smoke test, not a mobile-network or Core Web Vitals measurement.
+## Local performance
 
-These measurements do not establish Cloudflare CPU usage, global latency, sustained concurrency or availability. The actual Workers Free CPU budget remains a deployment acceptance check.
+A 50-event, 100-delivery scenario with 64-character identifiers and maximum safe integer values used 35,728 input bytes. The last uninstrumented check measured median replay **0.835 ms** and saved-result verification **0.996 ms** over 15 runs. Mixed faults produced 364,594 output bytes and 500 combined attempts; permanent failures produced 378,338 bytes and 600 combined attempts. The API independently enforces its 512 KiB result bound; these examples do not prove the largest possible serialization.
 
-## Corrections during verification
+Frontend JavaScript and CSS measured approximately **111 KiB gzip**, below the 250 KiB target. Browser usability checks completed in 579–615 ms, including a 500 ms observation interval, without third-party requests. This is a local smoke measurement rather than a mobile-network or Core Web Vitals result.
 
-A low-contrast import label was corrected before the passing accessibility run. Browser discovery now selects only browser specification files so that it does not execute the separate CLI suite. Mobile tests assert the visible local-result status rather than a redundant desktop-only badge.
+The Worker initializes its bounded validation/replay paths with fixed synthetic inputs before handling requests. Fresh-process local measurements improved the first maximum replay from 4.89–7.86 ms to 1.79–2.20 ms, with 18–21 ms startup initialization. The API also reuses safely serialized scenario/results when constructing responses. Neither optimization changes validation or scenario limits; cloud CPU must still be measured independently.
 
-Session initialization shares one in-flight lookup/creation within a page. This prevents startup and a quick replay from creating competing credentials in that page; it is not a cross-tab account synchronization system.
+## Recovery and retention
 
-## Outstanding release steps
+The isolated local recovery rehearsal applied both migrations, exported and restored into a separate empty persistence directory, and compared content digests, three indexes and four triggers. Restored owner access returned the exact scenario/result; expired and foreign-owner reads returned 404. UTF-8 insert/update guards rejected oversized storage. Capacity moved 2 → 3 → 2, then repeated actual scheduled-handler calls removed only the expired record, leaving one. The source database remained unchanged.
 
-1. Authorize Cloudflare and verify Workers Free. Confirm native rate-limit binding availability without enabling a paid add-on.
-2. Create remote D1, set its ID, apply the migration and deploy.
-3. Run browser tests against the actual HTTPS URL. Verify health, storage, production cookie flags, isolation, scheduled cleanup and actual provider limits/CPU behavior.
-4. Confirm the GitHub destination, publish and verify hosted CI.
+This verifies local SQL backup/restore and scheduled-handler behavior. It does not claim a production disaster-recovery exercise or a remote Time Travel restore.
 
-This release simulates delivery of complete order snapshots. Atomic consumer decisions are modeled in memory; D1 stores replay artifacts rather than real business transactions. It does not dispatch webhooks, process payments, execute external effects, or establish exactly-once behavior in a distributed system. The available fault modes do not model retry exhaustion following an earlier committed effect. See the scenario format and threat model for interpretation limits.
+## Walkthrough recordings
+
+- Desktop: 2 minutes 30.64 seconds, 1440 × 1100 including captions, 13 chapters.
+- Mobile: 37.32 seconds, 390 × 944 including captions, four chapters.
+
+The continuous browser recordings show fixtures, both consumers, attempt/state/effect evidence, custom conflicts and multiple orders, JSON edit/import/export, actual local D1 save/reload/open/delete, invalid input, method documentation and mobile navigation. The injected 503 demonstration is labelled explicitly. Both runs completed without page errors. MP4 decode, browser playback/seek and byte-range serving passed. Original recordings, captions, chapter data and review frames remain in the ignored local `.artifacts/walkthrough` directory.
+
+These are functional demonstrations recorded after implementation. The [build journal](BUILD_JOURNAL.md) records the construction and review steps; the videos are not a continuous historical recording of every edit.
+
+## Public verification and release status
+
+The initial Worker version was `4e039a2b-f713-4dc1-9c72-dcd253c07b47`. A separate real D1 database, both migrations and native write limiter were deployed successfully in the already verified Workers Free account, without a plan upgrade.
+
+The initial live stress run submitted three maximum-collection cases: mixed faults, permanent unavailability and lost acknowledgements. All saves returned 201, all reads returned 200, and full results matched the built CLI. All three owned synthetic records were removed. Observed CPU was 17–38 ms, above the 10 ms Free allowance despite successful responses. Startup and serialization changes address this finding; a new deployment and measured rerun are required before accepting performance.
+
+Remaining checks at this stage: optimized live CPU, remote scheduled cleanup, bounded security/rate-limit checks, three-engine public journeys, repository publication and hosted CI. Results will be recorded here after execution.
+
+## Interpretation limits
+
+This release simulates delivery of complete order snapshots. Consumer decisions are modeled in memory; D1 stores replay artifacts rather than real business transactions. It does not dispatch webhooks, process payments or establish exactly-once behavior across distributed systems. Concurrent consumers, dedupe expiry and retry exhaustion after an earlier committed effect are outside the current model. Cookie loss loses saved-run access. Anonymous traffic can exhaust shared hosting quotas. See the scenario format, threat model and operations guide for details.

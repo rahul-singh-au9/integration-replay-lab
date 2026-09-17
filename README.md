@@ -4,6 +4,8 @@ Reproduce integration failures before connecting a customer system. Import a bou
 
 The first release models **complete order snapshots** and a simulated transport. It does not make network calls to supplied destinations, process payments, or connect to live customer systems. Simulated delays use a virtual clock, so replay is deterministic and finishes immediately.
 
+The [build journal](docs/BUILD_JOURNAL.md) records implementation decisions and verification. See the [engineering review](docs/ENGINEERING_REVIEW.md) for security, interface and maintenance boundaries.
+
 ## Working scope
 
 - Duplicate deliveries, out-of-order revisions, a timeout after a successful commit, and permanent unavailability.
@@ -32,11 +34,11 @@ Open `http://127.0.0.1:8790`. The frontend, Worker API, local D1 and rate limite
 ```sh
 npm run check
 npm run audit:dependencies
-npx playwright install chromium
+npx playwright install chromium firefox webkit
 npm run test:e2e
 ```
 
-Browser tests run an isolated backend on port 8791 using `.wrangler/test-state`. The interactive preview database is separate. CI runs strict typing, unit/API tests, production build, dependency audit and browser checks.
+Browser tests use separate Worker/D1 instances on ports 8791, 8794 and 8796 for Chromium, Firefox and WebKit. The interactive preview database is separate. CI runs typed linting, formatting, strict typing, unit/API/client tests, frontend and CLI builds, CLI process tests, dependency audit and browser journeys.
 
 For repeatable command-line checks, export a scenario from the UI, then:
 
@@ -82,16 +84,16 @@ npx wrangler whoami
 npx wrangler d1 create integration-replay-lab
 ```
 
-Set the new database ID in `wrangler.jsonc`, then:
+For your own deployment, set `account_id` and the production `database_id` in `wrangler.jsonc` to your intended resources. The checked-in identifiers select this deployment and are not credentials. The separate all-zero `preview_database_id` preserves local database identity; it is not a remote preview database. Keep local commands in `--local` mode. Then:
 
 ```sh
 npm run db:migrate:remote
 npm run deploy
 ```
 
-Verify the actual HTTPS deployment with `BASE_URL=https://your-worker.workers.dev npm run test:e2e`. These tests create and remove synthetic records; run them only against a deployment you administer. Wait a minute between live runs to avoid the intended shared-IP write limit.
+Verify an owned HTTPS deployment one browser project at a time, for example `BASE_URL=https://your-worker.workers.dev npx playwright test --project=chromium`. Repeat for Firefox and WebKit, allowing at least 61 seconds between projects to respect the shared-IP write limit. These tests create and remove synthetic records; run them only against a deployment you administer. Build local assets first if running local tests. The bounded live API script documents its modes in [Operations](docs/OPERATIONS.md).
 
-Workers Free includes 100,000 API requests/day and 10 ms CPU per invocation. D1 includes 5 million rows read/day, 100,000 rows written/day, and 500 MB per database. Static asset requests are free. Limits are shared with other applications in the account. Native rate-limit binding availability must be confirmed without enabling a paid add-on. See [Operations](docs/OPERATIONS.md) for primary sources, maintenance, backup and recovery procedures.
+Workers Free includes 100,000 API requests/day and 10 ms CPU per invocation. D1 includes 5 million rows read/day, 100,000 rows written/day, and 500 MB per database. Static asset requests are free. Limits are shared with other applications in the account. Confirm native rate-limit binding availability on the selected account without enabling a paid add-on. See [Operations](docs/OPERATIONS.md) for primary sources, maintenance, backup and recovery procedures.
 
 ## Acceptance criteria
 
@@ -106,3 +108,9 @@ Workers Free includes 100,000 API requests/day and 10 ms CPU per invocation. D1 
 9. Application assets stay under 250 KiB gzip and bounded replay has a 100 ms local regression threshold. This is not a cloud CPU guarantee.
 
 Actual test results and deployment status are recorded in [Verification](docs/VERIFICATION.md). Read the [Scenario format](docs/SCENARIO_FORMAT.md) and [Threat model](docs/THREAT_MODEL.md) before interpreting results or adapting a real integration.
+
+## Recovery and walkthroughs
+
+After a production build, `npm run verify:recovery` creates isolated local databases and verifies migration history, SQL backup/restore, row/counter invariants, owner isolation, byte guards and actual scheduled cleanup. It does not overwrite the preview or remote database.
+
+With the local app running, `npm run record:walkthrough` records desktop and mobile browser journeys using synthetic scenarios. `FFMPEG_PATH=/absolute/path/to/ffmpeg npm run prepare:walkthrough` creates MP4 files and a chapter player. `npm run preview:walkthrough` serves that player on port 8798. Recordings and local evidence remain under the ignored `.artifacts` directory. Injected failure demonstrations are labelled; persistence demonstrations use actual local Worker/D1 bindings.

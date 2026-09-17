@@ -17,5 +17,5 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run audit:dependencies
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e

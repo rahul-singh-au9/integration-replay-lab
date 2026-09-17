@@ -12,12 +12,12 @@ Cloudflare advertises [Workers signup without a credit card](https://www.cloudfl
 
 Provider limits checked on 2026-09-17:
 
-| Resource | Relevant Free-plan allowance |
-| --- | --- |
-| Worker API | 100,000 requests per day; 10 ms CPU per invocation. Waiting for I/O is different from CPU execution. [Pricing](https://developers.cloudflare.com/workers/platform/pricing/) |
-| Static assets | Asset requests and storage are free. Keep `run_worker_first` restricted to `/api/*` so ordinary asset requests do not invoke API code. [Billing and routing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) |
+| Resource      | Relevant Free-plan allowance                                                                                                                                                                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker API    | 100,000 requests per day; 10 ms CPU per invocation. Waiting for I/O is different from CPU execution. [Pricing](https://developers.cloudflare.com/workers/platform/pricing/)                                                                                                                       |
+| Static assets | Asset requests and storage are free. Keep `run_worker_first` restricted to `/api/*` so ordinary asset requests do not invoke API code. [Billing and routing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)                                                    |
 | D1 operations | 5 million rows read and 100,000 rows written per day, resetting at 00:00 UTC. Reads count rows scanned; indexes and counter updates also affect work. Queries fail at free limits rather than automatically upgrading the plan. [Pricing](https://developers.cloudflare.com/d1/platform/pricing/) |
-| D1 capacity | 500 MB per database, 5 GB per account, 10 databases, and seven days of Time Travel recovery. [Limits](https://developers.cloudflare.com/d1/platform/limits/) |
+| D1 capacity   | 500 MB per database, 5 GB per account, 10 databases, and seven days of Time Travel recovery. [Limits](https://developers.cloudflare.com/d1/platform/limits/)                                                                                                                                      |
 
 Allowances are shared with other projects on the account. Storage limits do not bound request abuse, scans, or repeated save/delete churn. A maximum-size replay also needs measured Worker CPU headroom; browser or local test speed does not establish production Free-plan CPU compliance. If valid inputs exceed the CPU budget, reduce scenario limits or keep them local instead of upgrading.
 
@@ -42,6 +42,8 @@ The production credential is `__Host-irl_session`: 32 cryptographically random b
 
 Clearing cookies, losing a device, or moving browsers loses access to that workspace's saved runs. There is no verified identity, password reset, or account-recovery service. Export/import restores content into a new workspace; it cannot recover the old cookie or unlock old records. Export useful scenarios before clearing site data. Exported files are readable data.
 
+Storage requests have a 15-second deadline. Browsers with Web Locks coordinate initial session lookup/creation across tabs, with a 30-second lock-acquisition deadline; other browsers coalesce initialization only within the current page. A stalled request or lock remains a recoverable error. Run creation is not idempotent and is never retried automatically: after an uncertain save response, refresh the library before running again because the server may already have committed it.
+
 Validate and redact imported scenarios before saving. Schema checks are not secret scanning or personal-data redaction. Use synthetic or deliberately sanitized examples in public demonstrations. The deployment operator and Cloudflare can administer stored data; it is not end-to-end encrypted.
 
 ## Rate limiting
@@ -50,7 +52,7 @@ The native [Rate Limiting binding](https://developers.cloudflare.com/workers/run
 
 These counters are approximate, eventually consistent, and local to a Cloudflare location. Shared networks can cause false positives, while rotating IPs can bypass limits. They do not enforce a global request or spending budget. Missing or failed protection must fail closed. Exact storage capacity remains enforced in D1.
 
-The reviewed binding documentation does not publish a separate price or explicitly establish Free-plan entitlement. Confirm availability without enabling a paid feature before relying on it for deployment. Do not infer entitlement from examples referring to an application's free users. If deployment rejects the binding, stop and revise the free design rather than upgrade.
+The native binding was accepted by the initial deployment on the configured Workers Free account without a plan upgrade. This is an observed result for that account, not a guarantee of entitlement on every account. The reviewed binding documentation does not separately price the feature or explicitly establish a universal Free-plan entitlement. Recheck availability before deploying to a different account; if the binding is rejected, stop and revise the free design rather than upgrade.
 
 Cloudflare documents [local simulation](https://developers.cloudflare.com/workers/local-development/bindings-per-env/) for D1 and rate limiting. A test double can exercise a rejection response, but it does not verify distributed counter behavior.
 
@@ -66,11 +68,52 @@ npm run test:e2e
 npm run audit:dependencies
 ```
 
-After building, `npm run preview` serves the production assets with local Worker/D1 bindings on port 8790. It uses `--local`; local tests must not touch a production database. A development server is not a deployed service.
+After building, `npm run preview` serves the production assets with local Worker/D1 bindings on port 8790. It uses `--local`; local tests must not touch a production database. Browser projects use separate local backends on ports 8791, 8794 and 8796 with `.wrangler/test-chromium`, `.wrangler/test-firefox` and `.wrangler/test-webkit` persistence. The interactive preview remains separate from them.
 
-For an authorized deployment, select a verified Workers Free account, create a D1 database named `integration-replay-lab`, and replace the all-zero `database_id` in `wrangler.jsonc`. Apply reviewed migrations with `npm run db:migrate:remote`, then deploy with `npm run deploy`. These commands change the selected remote account. Verify the account and target database first.
+The configured remote D1 database is `integration-replay-lab`, ID `e63837fb-ecef-43e2-8d44-2d8bcfb3aeb2`. Its actual `database_id` is now in `wrangler.jsonc`. The intentionally all-zero `preview_database_id` retains the existing local preview binding and persistence identity; it is not the remote deployment ID or an indication that the production database is missing. Keep local preview commands on `--local` and do not replace that preview identifier merely to match the production ID.
+
+An initial deployment at [integration-replay-lab.rahulsg1508.workers.dev](https://integration-replay-lab.rahulsg1508.workers.dev/) succeeded on Workers Free with the native limiter and D1 binding. Initial publication does not establish completed live QA, hosted CI, or production CPU headroom; release evidence belongs in [Verification](VERIFICATION.md).
+
+For subsequent releases, verify the selected account and configured database, apply any reviewed migrations with `npm run db:migrate:remote`, then deploy with `npm run deploy`. These commands mutate the remote account. Do not create another database as part of a routine redeploy. A separate account requires its own database and reviewed configuration.
 
 After deployment, check HTTPS cookie flags, two-browser isolation, rejected cross-origin writes, health failure when the schema is unavailable, capacity and byte limits, rate-limit rejection, save/load round trips, and expiry scheduling. Confirm API failures never mark an unsaved result as saved and that local replay/export remain usable. Do not load-test a public Free account to its provider limits.
+
+## Bounded live verification
+
+Run `scripts/verify-live-api.mjs` only against a deployment you administer. Its URL allowlist accepts an HTTPS `workers.dev` origin for `integration-replay-lab` or an explicitly supplied suffixed `--worker-name`. It has no arbitrary destination, bulk-deletion or automatic creation-retry path. The default deployment is the one linked above; pass its origin explicitly:
+
+```sh
+npm run build:cli
+node scripts/verify-live-api.mjs --base-url https://integration-replay-lab.rahulsg1508.workers.dev --mode max-payload --dry-run
+node scripts/verify-live-api.mjs --base-url https://integration-replay-lab.rahulsg1508.workers.dev --mode smoke
+```
+
+The dry run computes bounded synthetic cases locally and makes no network requests. The live modes have different purposes:
+
+| Mode          | Checks and bounded writes                                                                                                                                                                                                                                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smoke`       | Static/API headers, database health, anonymous access rejection, unknown routes, unsupported methods and cross-origin rejection. It does not create a session or saved run.                                                                                                                                         |
+| `max-payload` | Three maximum collection-size scenarios with 50 events and 100 deliveries; full saved/retrieved results must match the local CLI computation. One synthetic session, three saves and three owned deletions: seven planned writes. Field bounds make these roughly 36 KiB valid inputs, not exactly 64 KiB payloads. |
+| `invalid`     | Excessive collection counts below the byte cap and an oversized request; verifies no saved run was created. One session plus three rejected writes.                                                                                                                                                                 |
+| `rate-limit`  | At most 15 session requests, stopping at the first 429 and checking `Retry-After`. If no rejection appears within the bound, it reports inconclusive rather than increasing load.                                                                                                                                   |
+
+Execute each selected mode separately, for example:
+
+```sh
+node scripts/verify-live-api.mjs --base-url https://integration-replay-lab.rahulsg1508.workers.dev --mode max-payload
+```
+
+Wait **at least 61 seconds after the final write** before starting another mutation mode or browser project. Do not run these modes or live browser projects in parallel. Other requests to this deployment from tabs or people sharing your IP may consume the same allowance. Respect any returned `Retry-After`; a rejection is a reason to wait, not to loop. After the bounded rate-limit probe, wait and run `invalid` or `max-payload` to check recovery.
+
+The script deletes only run IDs returned by its own successful creations and reports any unresolved cleanup IDs or uncertain save outcome. If a save response is lost, do not rerun creation blindly. Review only the reported IDs or exact synthetic title marker. Logs include HTTP status, request IDs and HTTP wall time, never session cookies or scenario payloads. HTTP timing does not measure Worker CPU; use provider execution measurements for that separate release gate.
+
+Run deployed browser checks one engine at a time:
+
+```sh
+BASE_URL=https://integration-replay-lab.rahulsg1508.workers.dev npx playwright test --project=chromium
+```
+
+Repeat with `--project=firefox` and `--project=webkit`, allowing the same 61-second cooldown between projects and following API mutation checks. The journeys create and remove synthetic records in fresh browser workspaces. Some cases deliberately stub failures to test recovery; those cases do not prove the remote failure mode occurred. Do not point the suite at a third-party deployment or interpret passing local tests as live verification.
 
 ## Monitoring and incidents
 

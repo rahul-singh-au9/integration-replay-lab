@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-cli
+.wrangler
+.artifacts
+coverage
+playwright-report
+test-results
+package-lock.json

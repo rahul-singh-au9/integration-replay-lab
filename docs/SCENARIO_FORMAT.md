@@ -6,18 +6,22 @@ Integration Replay Lab compares two in-memory consumers on the same deterministi
 
 Scenario schema and replay result schema are version `1`; the engine version is `1.0.0`.
 
-| Field | Meaning |
-| --- | --- |
-| `schemaVersion` | Must be `1` |
-| `id` | Scenario identifier |
-| `title` | Nonblank title, at most 160 characters |
-| `origin` | `fixture` for an authored example; `imported` for a user-supplied scenario |
-| `events` | Between 1 and 50 complete order snapshot records |
-| `deliveries` | Between 1 and 100 scheduled initial deliveries |
+| Field           | Meaning                                                                    |
+| --------------- | -------------------------------------------------------------------------- |
+| `schemaVersion` | Must be `1`                                                                |
+| `id`            | Scenario identifier                                                        |
+| `title`         | Nonblank title, at most 160 characters                                     |
+| `origin`        | `fixture` for an authored example; `imported` for a user-supplied scenario |
+| `events`        | Between 1 and 50 complete order snapshot records                           |
+| `deliveries`    | Between 1 and 100 scheduled initial deliveries                             |
 
 A raw scenario is limited to 65,536 UTF-8 bytes, including whitespace. `parseScenarioText(text)` accepts a raw scenario, not a report wrapper. A report importer should extract `scenario` and use `parseScenario(value)`, which also checks the object's serialized byte size.
 
+The browser and CLI share the same bundle importer. An export wrapper must identify `format: "integration-replay-lab"`, `schemaVersion: 1`, a valid `exportedAt` timestamp and its `scenario`; only optional `engineVersion` and `result` fields are also accepted. Included results are ignored during import and recomputed when the scenario runs. A bundle is limited to 1 MiB, and its contained scenario retains the 64 KiB limit. The CLI reads only regular UTF-8 files and caps bytes while reading, including if a file grows after its initial size check.
+
 Objects are strict: unknown fields, unknown fault types, unsupported statuses and prototype-related properties are rejected. IDs are nonempty, at most 64 characters, begin with a letter or digit, and otherwise contain letters, digits, `.`, `_`, `:`, `/`, or `-`. Collections are represented internally by maps rather than objects indexed by imported identifiers.
+
+Collection lengths are rejected before validating individual entries, so a compact malformed array cannot trigger validation of thousands of records. Byte-limit failures are distinguishable from other scenario-validation failures without treating unexpected engine errors as invalid user input.
 
 `origin: "imported"` does not establish that an input is a captured incident or that its claimed events happened. Neither input origin nor event identity is authenticated by the simulator.
 
@@ -42,7 +46,7 @@ Every event record requires:
 - `orderId` identifies the order whose complete state the event represents.
 - `revision` is a positive safe integer. The model trusts the producer's monotonic revision scheme; it does not infer versions from arrival time.
 - `totalCents` is a nonnegative safe integer. It is an amount in cents with no currency field or conversion. The simulator compares and stores integer values; it performs no financial calculations.
-- `occurredAt` is an ISO 8601 datetime with `Z` or an explicit UTC offset. Equivalent instants are canonicalized to UTC at millisecond precision. Occurrence time is part of semantic payload identity, but it does not schedule delivery or override revision order.
+- `occurredAt` is an ISO 8601 datetime with `Z` or an explicit UTC offset, at most 29 characters, and at most three fractional second digits. Submillisecond timestamps are rejected so distinct instants cannot silently collapse into the same identity. Equivalent instants are canonicalized to UTC at millisecond precision. Occurrence time is part of semantic payload identity, but it does not schedule delivery or override revision order.
 
 These are **full snapshots**, not deltas. A consumer may accept revision 10 without first receiving revisions 3–9. That would be inappropriate for incremental balance updates or other deltas. The simulator also does not enforce a business status-transition graph: it assumes each producer-issued snapshot is the intended state for its revision.
 
@@ -61,12 +65,12 @@ Each delivery requires:
 
 Delivery IDs must be unique. `recordId` must reference an existing event record. `atMs` is an integer virtual time from 0 through 86,400,000 milliseconds. A retry may occur up to 3,000 milliseconds after that initial time. Scenario array order need not be chronological.
 
-| Fault | First attempt | Later attempts |
-| --- | --- | --- |
-| `none` | Consumer processes the event and the sender receives an acknowledgement | No retry |
-| `timeout-before` | Consumer receives nothing; the sender sees a timeout | Healthy retry |
-| `timeout-after` | Consumer processes the event, but the acknowledgement is lost | Healthy retry, including another consumer invocation |
-| `unavailable` | Consumer receives nothing | Remains unavailable for all attempts |
+| Fault            | First attempt                                                           | Later attempts                                       |
+| ---------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- |
+| `none`           | Consumer processes the event and the sender receives an acknowledgement | No retry                                             |
+| `timeout-before` | Consumer receives nothing; the sender sees a timeout                    | Healthy retry                                        |
+| `timeout-after`  | Consumer processes the event, but the acknowledgement is lost           | Healthy retry, including another consumer invocation |
+| `unavailable`    | Consumer receives nothing                                               | Remains unavailable for all attempts                 |
 
 Every delivery gets at most three attempts. After the first unacknowledged attempt, retry at `timeMs + 1000`; after the second, retry at `timeMs + 2000`. Thus a permanently unavailable delivery starting at zero has attempts at 0, 1000 and 3000 milliseconds. These are virtual schedule calculations, not real waits, and there is no jitter.
 
@@ -119,6 +123,8 @@ Dead letters are separate: they represent deliveries that exhausted transport at
 
 `replayScenario(scenario)` returns `schemaVersion`, `engineVersion`, `scenarioId`, `scenarioTitle`, `origin`, `mode: "simulation"`, `strategies`, and `warnings`.
 
+`createReplay(input)` validates once and returns both the accepted `scenario` and computed `result` for persistence. `parseSavedReplay(scenario, result)` checks a retrieved artifact against the complete deterministic result for the supported engine version before displaying it. It compares object properties without depending on their serialization order, while preserving array order, and rejects missing, extra or altered decisions, state, metrics and evidence. An unknown engine version is rejected explicitly; its scenario can still be imported and run to create a new result. This consistency check is not a signature or proof that an imported scenario describes real events.
+
 Each strategy has `id` (`naive` or `robust`), `name`, `attempts`, `finalOrders`, `effects`, `deadLetters`, and `metrics`.
 
 Attempt records separate transport and consumer disposition:
@@ -135,17 +141,17 @@ Attempt records separate transport and consumer disposition:
 
 Final orders include `orderId`, `revision`, `status`, `totalCents`, canonical `occurredAt`, `eventId`, and `recordId`, sorted by order ID. Effects contain their logical `key`, `deliveryId`, `eventId`, `orderId`, `revision`, `status`, and virtual `timeMs`. Dead letters contain `deliveryId`, `recordId`, `eventId`, attempt count, `lastTimeMs`, and a reason.
 
-| Metric | Counted unit |
-| --- | --- |
-| `attempts` | All initial and retry transport attempts |
-| `received` | Consumer invocations, including duplicates, stale snapshots and conflicts |
-| `applied` | Invocations that changed modeled order state |
-| `duplicates` | Invocations discarded as duplicates |
-| `stale` | Invocations discarded as older snapshots |
-| `conflicts` | Invocations quarantined for identity or revision conflicts |
-| `deadLetters` | Deliveries exhausted without acknowledgement |
-| `sideEffects` | Simulated outbox records emitted |
-| `duplicateEffects` | Emitted records whose logical effect key had already been emitted |
+| Metric             | Counted unit                                                              |
+| ------------------ | ------------------------------------------------------------------------- |
+| `attempts`         | All initial and retry transport attempts                                  |
+| `received`         | Consumer invocations, including duplicates, stale snapshots and conflicts |
+| `applied`          | Invocations that changed modeled order state                              |
+| `duplicates`       | Invocations discarded as duplicates                                       |
+| `stale`            | Invocations discarded as older snapshots                                  |
+| `conflicts`        | Invocations quarantined for identity or revision conflicts                |
+| `deadLetters`      | Deliveries exhausted without acknowledgement                              |
+| `sideEffects`      | Simulated outbox records emitted                                          |
+| `duplicateEffects` | Emitted records whose logical effect key had already been emitted         |
 
 These are counts, not inferred error rates. Conflict retries count as additional conflict invocations. A robust duplicate is successful suppression, while a duplicate effect is an unwanted repeat emission in the model. The same value must not be used for both concepts.
 
