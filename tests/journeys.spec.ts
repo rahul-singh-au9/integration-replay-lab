@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
 import { fixtures } from '../src/core/fixtures';
 import { replayScenario } from '../src/core/replay';
+import { MAX_SAVED_EVENTS, MAX_SAVED_DELIVERIES, type Scenario } from '../src/core/schema';
 
 test('server replay persists real computed results and isolates saved runs', async ({
   page,
@@ -466,4 +467,76 @@ test('file imports reject invalid bytes and ignore a cancelled asynchronous read
     await Reflect.get(window, 'finishFileRead')();
   });
   await expect(input).toHaveValue('newer input');
+});
+
+test('scenarios beyond saved-run limits still replay and export locally without uploading', async ({
+  page,
+}) => {
+  await stubStorage(page);
+  const uploads: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/runs') && request.method() === 'POST')
+      uploads.push(request.url());
+  });
+  await page.goto('/');
+  const event = fixtures[0].scenario.events[0];
+  const cases: Scenario[] = [
+    {
+      ...structuredClone(fixtures[0].scenario),
+      title: 'More snapshots than saved runs allow',
+      origin: 'imported',
+      events: Array.from({ length: MAX_SAVED_EVENTS + 1 }, (_, index) => ({
+        ...event,
+        recordId: `record-${index}`,
+        eventId: `event-${index}`,
+        orderId: `order-${index}`,
+      })),
+      deliveries: Array.from({ length: MAX_SAVED_EVENTS + 1 }, (_, index) => ({
+        id: `delivery-${index}`,
+        recordId: `record-${index}`,
+        atMs: index,
+        fault: 'none',
+      })),
+    },
+    {
+      ...structuredClone(fixtures[0].scenario),
+      title: 'More deliveries than saved runs allow',
+      origin: 'imported',
+      deliveries: Array.from({ length: MAX_SAVED_DELIVERIES + 1 }, (_, index) => ({
+        id: `delivery-${index}`,
+        recordId: event.recordId,
+        atMs: index,
+        fault: 'none',
+      })),
+    },
+  ];
+  for (const scenario of cases) {
+    await page.getByRole('button', { name: 'Import scenario', exact: true }).click();
+    await page.getByLabel('Scenario JSON', { exact: true }).fill(JSON.stringify(scenario));
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Import scenario', exact: true })
+      .click();
+    await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeDisabled();
+    await expect(page.locator('#saved-run-limit')).toContainText(
+      `Saved runs support up to ${MAX_SAVED_EVENTS} snapshots and ${MAX_SAVED_DELIVERIES} deliveries`,
+    );
+    await page.getByRole('button', { name: 'Run locally', exact: true }).click();
+    await expect(page.getByText('Local replay · Not saved', { exact: true })).toBeVisible();
+    const downloading = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export JSON', exact: true }).click();
+    const downloaded = await downloading;
+    const bundle = JSON.parse(await readFile((await downloaded.path())!, 'utf8'));
+    expect(bundle.scenario).toEqual(scenario);
+    expect(bundle.result).toEqual(replayScenario(scenario));
+  }
+  expect(uploads).toEqual([]);
+  await page.setViewportSize({ width: 320, height: 740 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.locator('.scenario-nav').getByRole('button').first().click();
+  await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeEnabled();
+  await expect(page.locator('#saved-run-limit')).toHaveCount(0);
 });

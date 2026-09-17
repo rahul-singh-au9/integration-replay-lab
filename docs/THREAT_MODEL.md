@@ -46,7 +46,7 @@ These distinctions follow general delivery guidance: [Stripe documents unordered
 2. An example or imported JSON is validated and replayed in browser memory. Imported text and URLs remain data. There is no localStorage run database; a page reload loses unsaved browser state.
 3. Explicit server saving sends a scenario to the same-origin API. The client cannot submit a trusted precomputed result or owner identifier.
 4. The API repeats validation, computes the result, derives owner scope from the anonymous session cookie, and persists the run.
-5. Owner-scoped list/read/delete queries expose only the corresponding unexpired records. List metadata is checked before being returned. A detail read validates the stored scenario, recomputes the deterministic replay with the supported engine, and checks the cached canonical result and scenario metadata before returning them.
+5. Owner-scoped list/read/delete queries expose only the corresponding unexpired records. List metadata is checked before being returned. A detail read validates the stored scenario, recomputes the deterministic replay with the supported engine, and checks the stored engine version and SHA-256 fingerprint of its canonical result, plus scenario metadata, before returning them. Legacy full-result rows use exact canonical equality. Fingerprint envelopes have a strict bounded format.
 6. Export writes readable JSON for the visitor. Import restores content, not ownership credentials or the identity of the original source.
 
 No replay attempt performs network I/O to a supplied destination. Adding real webhook intake, API connectors, queue workers, model calls, or arbitrary code execution requires a new threat review and data disclosure.
@@ -78,7 +78,7 @@ These are release requirements; listing a control is not proof that a deployed s
 
 The anonymous cookie is a bearer capability, not a verified account. Losing it loses access; there is no identity recovery. Export/import restores the content into another workspace without restoring the previous credential. Sharing an export shares its contents.
 
-A cached result is bound to its scenario and engine version. An incompatible or damaged run fails closed on read; reading it never rewrites historical results. The owner can still delete the row, and an existing scenario export can be imported and replayed afresh. A future engine upgrade must explicitly preserve supported results or migrate affected data.
+A saved result fingerprint (or legacy full result) is bound to its scenario and engine version. The digest detects mismatches; it is not a signature against an attacker who can replace the entire database record. An incompatible or damaged run fails closed on read; reading it never rewrites historical results. The owner can still delete the row, and an existing scenario export can be imported and replayed afresh. A future engine upgrade must explicitly preserve supported results or migrate affected data.
 
 Saved runs expire 30 days after creation, with cleanup and recovery caveats documented in [Operations](OPERATIONS.md). Deleting a run cannot delete a visitor's exported copy. Simulated idempotency state is rebuilt for every replay; it is not retained as a production processing ledger.
 
@@ -95,7 +95,11 @@ Saved runs expire 30 days after creation, with cleanup and recovery caveats docu
 - Create separate cookie jars and test foreign known IDs, list/read/delete isolation, malformed and duplicate cookies, missing Origin, cross-site headers, and unsupported content types.
 - Stream an oversized multibyte body without trusting Content-Length; test malformed UTF-8 and output-size rejection with no insertion.
 - Race saves at per-owner and global limits; verify counters after deletion and scheduled expiry, including exact expiry boundaries.
-- Tamper with cached decisions, metrics, warnings, engine versions, scenario data, and list metadata; reject inconsistent artifacts without disclosing their contents or blocking owner-scoped deletion.
+- Tamper with result fingerprints, legacy cached decisions, metrics, warnings, engine versions, scenario data, and list metadata; reject inconsistent artifacts without disclosing their contents or blocking owner-scoped deletion.
 - Force limiter, database, request-stream, and unexpected replay failures; require private errors, no partial insertions, and continued local replay/export.
 
 Use local bindings and synthetic scenarios for adversarial tests. Do not exhaust public provider quotas as a substitute for bounded local tests.
+
+## Hosting compute boundary
+
+The server accepts at most 20 event records and 40 deliveries for new saved runs, rejecting larger collections before replay or insertion. Browser and CLI replay retain 50 records and 100 deliveries. This distinction is visible in the workbench. Earlier saved records remain readable for compatibility, including larger valid historical runs; their computation can exceed the new-save performance envelope. The digest check and ownership rules still apply.

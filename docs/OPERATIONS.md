@@ -1,6 +1,6 @@
 # Operations
 
-Integration Replay Lab compares deterministic order-snapshot processors under authored delivery failures. Replay runs in browser memory or in the same-origin Worker. Optional server saving stores the validated scenario and its server-computed result in D1. This is real application persistence, but the orders, deliveries, acknowledgements, and retry clock inside each replay are simulated. The application makes no outbound calls to webhook destinations or model providers.
+Integration Replay Lab compares deterministic order-snapshot processors under authored delivery failures. Replay runs in browser memory or in the same-origin Worker. Optional server saving stores the validated scenario, engine version and a SHA-256 fingerprint of the canonical server-computed result in D1. Opening a saved run recomputes its result and verifies the fingerprint; legacy full-result records remain readable. This is real application persistence, but the orders, deliveries, acknowledgements, and retry clock inside each replay are simulated. The application makes no outbound calls to webhook destinations or model providers.
 
 Browser-only results are held in memory, not a localStorage database. Export a useful scenario/result or explicitly save it before reloading or leaving the page. A saved result records its engine version; rerunning it after an engine change is a new computation.
 
@@ -26,9 +26,10 @@ No timed inactivity suspension was found in the reviewed Workers/D1 documentatio
 ## Application capacity and retention
 
 - At most 20 unexpired saved runs per anonymous browser workspace.
+- Server saves accept at most 20 event records and 40 deliveries. Local/CLI replay retains the larger 50-event/100-delivery limit. The interface explains this before a save; direct over-limit API submissions receive 413 before replay or database insertion.
 - At most 500 saved rows across the deployment, including expired rows waiting for cleanup.
-- A validated scenario is at most 64 KiB and its computed result at most 512 KiB, measured as UTF-8 bytes at the API boundary. Their combined maximum is 576 KiB, below the 600 KiB entry budget before row metadata and database overhead.
-- At those payload maxima, 500 runs hold approximately 281.25 MiB of scenario/result text. Indexes, row metadata, SQLite allocation, and migration history require additional space; monitor actual D1 size.
+- A validated scenario is at most 64 KiB and its computed result at most 512 KiB, measured as UTF-8 bytes at the API boundary. New records persist a result fingerprint envelope of at most 256 ASCII bytes; full result bodies are reconstructed and verified on read. Earlier full-result records remain supported. Their combined maximum is 576 KiB, below the 600 KiB entry budget before row metadata and database overhead.
+- At the legacy payload maxima, 500 runs hold approximately 281.25 MiB of scenario/result text; 500 new compact records need at most approximately 31.38 MiB before metadata. Indexes, row metadata, SQLite allocation, and migration history require additional space; monitor actual D1 size.
 - Runs expire 30 days after creation. Reads and deletes exclude a row at its exact expiration time, before cleanup has physically removed it.
 - Scheduled cleanup runs daily at 03:17 UTC. Failed cleanup can leave expired rows using global capacity until a later successful run.
 
@@ -90,12 +91,12 @@ node scripts/verify-live-api.mjs --base-url https://integration-replay-lab.rahul
 
 The dry run computes bounded synthetic cases locally and makes no network requests. The live modes have different purposes:
 
-| Mode          | Checks and bounded writes                                                                                                                                                                                                                                                                                           |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `smoke`       | Static/API headers, database health, anonymous access rejection, unknown routes, unsupported methods and cross-origin rejection. It does not create a session or saved run.                                                                                                                                         |
-| `max-payload` | Three maximum collection-size scenarios with 50 events and 100 deliveries; full saved/retrieved results must match the local CLI computation. One synthetic session, three saves and three owned deletions: seven planned writes. Field bounds make these roughly 36 KiB valid inputs, not exactly 64 KiB payloads. |
-| `invalid`     | Excessive collection counts below the byte cap and an oversized request; verifies no saved run was created. One session plus three rejected writes.                                                                                                                                                                 |
-| `rate-limit`  | At most 15 session requests, stopping at the first 429 and checking `Retry-After`. If no rejection appears within the bound, it reports inconclusive rather than increasing load.                                                                                                                                   |
+| Mode          | Checks and bounded writes                                                                                                                                                                                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `smoke`       | Static/API headers, database health, anonymous access rejection, unknown routes, unsupported methods and cross-origin rejection. It does not create a session or saved run.                                                                                                                                        |
+| `max-payload` | Three maximum collection-size scenarios with 20 events and 40 deliveries; full saved/retrieved results must match the local CLI computation. One synthetic session, three saves and three owned deletions: seven planned writes. Field bounds make these roughly 14 KiB valid inputs, not exactly 64 KiB payloads. |
+| `invalid`     | Excessive collection counts below the byte cap and an oversized request; verifies no saved run was created. One session plus three rejected writes.                                                                                                                                                                |
+| `rate-limit`  | At most 15 session requests, stopping at the first 429 and checking `Retry-After`. If no rejection appears within the bound, it reports inconclusive rather than increasing load.                                                                                                                                  |
 
 Execute each selected mode separately, for example:
 
@@ -142,6 +143,8 @@ For an application release rollback:
 npx wrangler versions list --name integration-replay-lab --json
 npx wrangler rollback "WORKER_VERSION_ID" --name integration-replay-lab --message "Restore verified application version"
 ```
+
+A version that predates compact fingerprint storage cannot open newly saved compact records. Roll back only to a version that supports both storage formats, or explicitly migrate after a private backup. Do not deploy an older reader and assume schema compatibility implies data-format compatibility.
 
 A [Worker rollback](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/) does not restore D1 data or schema. Verify code/schema compatibility, then repeat isolation and save/load checks.
 

@@ -1,6 +1,8 @@
 import {
   MAX_EVENTS,
   MAX_SCENARIO_BYTES,
+  MAX_SAVED_EVENTS,
+  MAX_SAVED_DELIVERIES,
   ScenarioSizeError,
   ScenarioValidationError,
 } from '../src/core/schema';
@@ -20,6 +22,8 @@ const DAY = 86_400_000;
 const MAX_RUNS = 20;
 const MAX_TOTAL_RUNS = 500;
 const MAX_RESULT_BYTES = 512 * 1024;
+const RESULT_DIGEST_FORMAT = 'integration-replay-result-digest';
+const MAX_DIGEST_ENVELOPE_LENGTH = 256;
 const RETENTION_DAYS = 30;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
@@ -60,7 +64,7 @@ function runResponse(
   resultJson: string,
   status = 200,
 ): Response {
-  // Both large values were already validated and JSON-encoded for storage/integrity checks.
+  // Both large values were already validated and JSON-encoded for integrity checks.
   // Reuse those encodings; metadata is encoded separately, never interpolated as raw text.
   const head = JSON.stringify(summary).slice(0, -1);
   return serializedJson(
@@ -85,9 +89,43 @@ function sessionToken(request: Request, url: URL): string | undefined {
   return value && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
-async function ownerId(token: string): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function ownerId(token: string): Promise<string> {
+  return sha256(new TextEncoder().encode(token));
+}
+
+async function verifyStoredResult(
+  stored: string,
+  resultJson: string,
+  engineVersion: string,
+): Promise<void> {
+  // Earlier records stored the complete canonical result. Keep those readable
+  // without parsing a second large object or rewriting historical data on read.
+  if (stored === resultJson) return;
+  if (stored.length > MAX_DIGEST_ENVELOPE_LENGTH)
+    throw new Error('Saved result integrity check failed');
+  const parsed: unknown = JSON.parse(stored);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Invalid saved result digest');
+  }
+  const envelope = parsed as Record<string, unknown>;
+  if (
+    Object.keys(envelope).length !== 4 ||
+    envelope.format !== RESULT_DIGEST_FORMAT ||
+    envelope.schemaVersion !== 1 ||
+    envelope.engineVersion !== engineVersion ||
+    typeof envelope.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(envelope.sha256)
+  ) {
+    throw new Error('Invalid or unsupported saved result digest');
+  }
+  if (envelope.sha256 !== (await sha256(new TextEncoder().encode(resultJson)))) {
+    throw new Error('Saved result integrity check failed');
+  }
 }
 
 function requireSameOrigin(request: Request, url: URL): void {
@@ -241,9 +279,22 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     ) {
       throw new HttpError(400, 'Expected a JSON object containing only scenario.');
     }
+    const input = (body as { scenario: unknown }).scenario;
+    if (input !== null && typeof input === 'object' && !Array.isArray(input)) {
+      const candidate = input as Record<string, unknown>;
+      if (
+        (Array.isArray(candidate.events) && candidate.events.length > MAX_SAVED_EVENTS) ||
+        (Array.isArray(candidate.deliveries) && candidate.deliveries.length > MAX_SAVED_DELIVERIES)
+      ) {
+        throw new HttpError(
+          413,
+          `Saved replays support at most ${MAX_SAVED_EVENTS} snapshots and ${MAX_SAVED_DELIVERIES} deliveries. Run larger scenarios locally.`,
+        );
+      }
+    }
     let computed;
     try {
-      computed = createReplay((body as { scenario: unknown }).scenario);
+      computed = createReplay(input);
     } catch (error) {
       if (!(error instanceof ScenarioValidationError)) throw error;
       throw new HttpError(error instanceof ScenarioSizeError ? 413 : 400, error.message);
@@ -253,11 +304,18 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     if (new TextEncoder().encode(serialized).byteLength > MAX_SCENARIO_BYTES)
       throw new HttpError(413, 'Scenario exceeds the 64 KiB limit.');
     const resultJson = JSON.stringify(replay);
-    if (new TextEncoder().encode(resultJson).byteLength > MAX_RESULT_BYTES)
+    const resultBytes = new TextEncoder().encode(resultJson);
+    if (resultBytes.byteLength > MAX_RESULT_BYTES)
       throw new HttpError(
         413,
-        'Replay output exceeds the 512 KiB storage limit. Use a smaller scenario.',
+        'Replay output exceeds the 512 KiB response limit. Use a smaller scenario.',
       );
+    const storedResult = JSON.stringify({
+      format: RESULT_DIGEST_FORMAT,
+      schemaVersion: 1,
+      engineVersion: replay.engineVersion,
+      sha256: await sha256(resultBytes),
+    });
     const runId = crypto.randomUUID();
     const count = scenario.events.length;
     // One statement serializes concurrent capacity checks with the insertion.
@@ -276,7 +334,7 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
         now + RETENTION_DAYS * DAY,
         count,
         serialized,
-        resultJson,
+        storedResult,
         MAX_TOTAL_RUNS - 1,
         owner,
         now,
@@ -314,15 +372,15 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
       throw new Error('Invalid saved run');
     const { scenario, result } = createReplay(JSON.parse(row.scenario));
     const resultJson = JSON.stringify(result);
-    // The cache must match this engine's exact canonical result. Unknown engine versions
-    // require an explicit migration instead of silently rewriting historical conclusions.
+    // A digest or legacy full result must match this engine's canonical output.
+    // Unknown engine versions require an explicit compatibility or migration decision.
     if (
       row.title !== scenario.title ||
       row.origin !== scenario.origin ||
-      row.event_count !== scenario.events.length ||
-      row.result !== resultJson
+      row.event_count !== scenario.events.length
     )
       throw new Error('Saved run integrity check failed');
+    await verifyStoredResult(row.result, resultJson, result.engineVersion);
     return runResponse(summary, JSON.stringify(scenario), resultJson);
   }
   const result = await env.DB.prepare(

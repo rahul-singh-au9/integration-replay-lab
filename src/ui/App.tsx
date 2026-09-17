@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fixtures } from '../core/fixtures';
-import { type Scenario } from '../core/schema';
+import { MAX_SAVED_EVENTS, MAX_SAVED_DELIVERIES, type Scenario } from '../core/schema';
 import { replayScenario, type ReplayResult } from '../core/replay';
 import * as api from './api';
 import { Dialog } from './Dialog';
@@ -636,7 +636,11 @@ export default function App() {
     setEditor(mode);
   }
 
+  const exceedsSavedLimits =
+    scenario.events.length > MAX_SAVED_EVENTS || scenario.deliveries.length > MAX_SAVED_DELIVERIES;
+
   async function run(mode: 'server' | 'local') {
+    if (mode === 'server' && exceedsSavedLimits) return;
     setRunning(mode);
     setNotice(null);
     const currentGeneration = generation.current;
@@ -1108,7 +1112,8 @@ export default function App() {
                     </button>
                     <button
                       className="button button-primary"
-                      disabled={!!running}
+                      disabled={!!running || exceedsSavedLimits}
+                      aria-describedby={exceedsSavedLimits ? 'saved-run-limit' : undefined}
                       onClick={() => void run('server')}
                     >
                       <Icon name="play" size={16} />
@@ -1117,13 +1122,25 @@ export default function App() {
                   </div>
                 </div>
               </section>
+              {exceedsSavedLimits && (
+                <div className="storage-banner" role="status" id="saved-run-limit">
+                  <Icon name="info" />
+                  <p>
+                    This scenario has {scenario.events.length} snapshots and{' '}
+                    {scenario.deliveries.length} deliveries. Saved runs support up to{' '}
+                    {MAX_SAVED_EVENTS} snapshots and {MAX_SAVED_DELIVERIES} deliveries. Run locally
+                    and export this larger scenario, or reduce its size to save it.
+                  </p>
+                </div>
+              )}
               <div className="privacy-note">
                 <Icon name="info" size={15} />
                 <p>
                   <strong>Run and save</strong> uploads the scenario and saves its result for{' '}
                   {session?.retentionDays ?? 30} days, private to this browser’s cookie. Remove
                   secrets and personal identifiers first. <strong>Run locally</strong> keeps the
-                  scenario on this device.
+                  scenario on this device. Saved runs support up to {MAX_SAVED_EVENTS} snapshots and{' '}
+                  {MAX_SAVED_DELIVERIES} deliveries.
                 </p>
               </div>
               <nav className="view-tabs" aria-label="Workbench sections">

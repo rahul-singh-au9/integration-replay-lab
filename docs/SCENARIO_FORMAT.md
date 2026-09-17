@@ -2,6 +2,8 @@
 
 Integration Replay Lab compares two in-memory consumers on the same deterministic webhook delivery schedule. It does not send network requests, contact a connector, wait in real time, or create external business effects. Results describe the supplied model and faults, not observed production reliability.
 
+Saving on the hosted service supports at most **20 event records and 40 deliveries**. The scenario format itself supports **50 event records and 100 deliveries** for browser/CLI replay and export. Larger valid scenarios remain usable locally, with a clear explanation beside the disabled save action.
+
 ## Format and limits
 
 Scenario schema and replay result schema are version `1`; the engine version is `1.0.0`.

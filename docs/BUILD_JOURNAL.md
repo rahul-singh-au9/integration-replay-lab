@@ -76,3 +76,25 @@ A separate D1 database was created in the authorized Workers Free account. Both 
 Initial maximum-scenario HTTPS tests returned complete correct server results matching the built CLI, and all owned test records were removed. Actual request CPU measured 17–38 ms, above the Free-plan allowance. This finding was retained instead of treating successful HTTP responses as a performance pass.
 
 The Worker now initializes fixed bounded replay paths during startup and avoids repeated encoding of large result objects. Tests preserve full validation, input limits, result integrity and escaping. A measured cloud rerun is the acceptance criterion; local optimization measurements alone are insufficient.
+
+## 9. Reduce repeated storage work and retry scheduling cost
+
+The first startup/serialization optimization improved several live cases, but the maximum mixed and acknowledgement-loss cases still exceeded 10 ms CPU. A smaller test also lacked consistent headroom, so reducing advertised limits was not accepted as a substitute for addressing the repeated work.
+
+New saved rows now store the validated scenario, engine version and SHA-256 fingerprint of the canonical computed result. Opening a row recomputes and verifies the result, as before, without transferring hundreds of kilobytes of repeated attempt text through D1. Strict envelope validation and legacy full-result equality preserve compatibility and reject damaged records. Unknown engine versions still fail closed. This representation needs no schema change, but rollback must use a reader that understands it.
+
+The retry scheduler now uses a stable minimum heap rather than repeatedly sorting the queue. Four fixture results and twelve seeded maximum-size results match complete-result fingerprints captured from the previous implementation, and independent sorted-schedule comparisons cover every attempt in both strategies. Scenario limits and observable replay behavior remain unchanged.
+
+The initial published revision passed hosted CI: 129 unit/API/client/import tests, nine CLI checks and 39 browser journeys with no retries. Later optimization checks are recorded separately. Dependency update proposals now respect the compiler/parser compatibility range and Node 24 declaration target.
+
+## 10. Make hosting bounds explicit
+
+Compact storage and heap scheduling brought later maximum-scenario calls down to 7–8 ms, but first large saves/reads still measured 21–28 ms. Increasing initialization from ten to one hundred passes raised Worker startup to 232 ms without eliminating those spikes, so that experiment was reverted. Cloudflare allows occasional CPU overages, but this application does not rely on that tolerance as its performance target.
+
+Server saves now support 20 event records and 40 deliveries. The browser and CLI retain 50-event/100-delivery local replay and export. The UI explains the distinction and prevents an oversized save; the API rejects it before replay and insertion. This is an explicit product limit for free hosting, with an unchanged larger local simulation capability. The bounded live verifier now targets the actual server maximum and checks over-limit rejection.
+
+## 11. Verify the bounded release
+
+The updated local release passed 157 core/API/client/import tests, nine CLI process tests and 42 browser journeys across three engines without retries. The additional browser journey proves that larger scenarios remain usable locally and exportable without sending a prohibited save. The restored database check now includes both new fingerprint and legacy full-result representations.
+
+Version `b8d57adb-6cc5-47be-a4aa-e59e399bd461` deployed with 51 ms startup. All three actual server-maximum scenarios saved and reopened with full CLI-equivalent results, then their owned records were removed. CPU observations were 4–9 ms for five replay/read requests and 17 ms for one save. No provider CPU error occurred, but the stricter every-request 10 ms target remains unproven. This observation is preserved in the verification record.

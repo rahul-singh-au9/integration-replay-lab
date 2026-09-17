@@ -94,6 +94,59 @@ interface ScheduledAttempt {
   ordinal: number;
 }
 
+function compareAttempts(left: ScheduledAttempt, right: ScheduledAttempt): number {
+  return left.timeMs - right.timeMs || left.ordinal - right.ordinal;
+}
+
+/** A bounded min-heap preserves the original time/ordinal schedule without repeated sorts. */
+class AttemptQueue {
+  constructor(private readonly values: ScheduledAttempt[]) {
+    for (let index = Math.floor(values.length / 2) - 1; index >= 0; index--) this.moveDown(index);
+  }
+
+  get length(): number {
+    return this.values.length;
+  }
+
+  push(value: ScheduledAttempt): void {
+    let index = this.values.push(value) - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (compareAttempts(this.values[parent], value) <= 0) break;
+      this.values[index] = this.values[parent];
+      index = parent;
+    }
+    this.values[index] = value;
+  }
+
+  shift(): ScheduledAttempt | undefined {
+    const first = this.values[0];
+    const last = this.values.pop();
+    if (this.values.length && last) {
+      this.values[0] = last;
+      this.moveDown(0);
+    }
+    return first;
+  }
+
+  private moveDown(start: number): void {
+    let index = start;
+    const value = this.values[index];
+    while (index * 2 + 1 < this.values.length) {
+      let child = index * 2 + 1;
+      if (
+        child + 1 < this.values.length &&
+        compareAttempts(this.values[child + 1], this.values[child]) < 0
+      )
+        child++;
+      if (compareAttempts(value, this.values[child]) <= 0) break;
+      this.values[index] = this.values[child];
+      index = child;
+    }
+    this.values[index] = value;
+  }
+}
+
 type Disposition = { decision: Exclude<ConsumerDecision, 'not-received'>; reason: string };
 
 /** Fixed field order gives semantic equality without a collision-prone short hash. */
@@ -139,12 +192,14 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
     sideEffects: 0,
     duplicateEffects: 0,
   };
-  const queue: ScheduledAttempt[] = scenario.deliveries.map((delivery, ordinal) => ({
-    delivery,
-    ordinal,
-    attempt: 1,
-    timeMs: delivery.atMs,
-  }));
+  const queue = new AttemptQueue(
+    scenario.deliveries.map((delivery, ordinal) => ({
+      delivery,
+      ordinal,
+      attempt: 1,
+      timeMs: delivery.atMs,
+    })),
+  );
   let nextOrdinal = queue.length;
 
   function consume(event: OrderEvent, scheduled: ScheduledAttempt): Disposition {
@@ -214,7 +269,6 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
   }
 
   while (queue.length) {
-    queue.sort((a, b) => a.timeMs - b.timeMs || a.ordinal - b.ordinal);
     const scheduled = queue.shift()!;
     const event = records.get(scheduled.delivery.recordId)!;
     const fault = scheduled.delivery.fault;

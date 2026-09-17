@@ -138,14 +138,23 @@ function acceptSession(response) {
   check(body.retentionDays === 30 && body.maxRuns === 20, 'Unexpected session limits.');
 }
 
-function maximumScenario(kind) {
+const MAX_SAVED_EVENTS = 20;
+const MAX_SAVED_DELIVERIES = 40;
+const SAVED_LIMIT_MESSAGE =
+  'Saved replays support at most 20 snapshots and 40 deliveries. Run larger scenarios locally.';
+
+function maximumScenario(
+  kind,
+  eventCount = MAX_SAVED_EVENTS,
+  deliveryCount = MAX_SAVED_DELIVERIES,
+) {
   const id = (prefix, index) => `${prefix}${String(index).padStart(63, '0')}`;
   return {
     schemaVersion: 1,
     id: `maximum-${kind}-${randomUUID()}`,
     title: `Synthetic maximum ${kind} verification ${marker}`,
     origin: 'fixture',
-    events: Array.from({ length: 50 }, (_, index) => ({
+    events: Array.from({ length: eventCount }, (_, index) => ({
       recordId: id('r', index),
       eventId: id('e', index),
       orderId: id('o', index),
@@ -154,9 +163,9 @@ function maximumScenario(kind) {
       totalCents: Number.MAX_SAFE_INTEGER,
       occurredAt: '2026-09-17T00:00:00Z',
     })),
-    deliveries: Array.from({ length: 100 }, (_, index) => ({
+    deliveries: Array.from({ length: deliveryCount }, (_, index) => ({
       id: id('d', index),
-      recordId: id('r', index % 50),
+      recordId: id('r', index % eventCount),
       atMs: 0,
       fault:
         kind === 'permanent' || (kind === 'mixed' && index % 2 !== 0)
@@ -204,7 +213,7 @@ function prepareMaximums() {
       0,
     );
     check(
-      combinedAttempts === (kind === 'mixed' ? 500 : kind === 'permanent' ? 600 : 400),
+      combinedAttempts === (kind === 'mixed' ? 200 : kind === 'permanent' ? 240 : 160),
       'Unexpected maximum retry schedule.',
     );
     check(
@@ -282,7 +291,7 @@ async function verifyMaxPayload() {
     combinedAttempts,
   }));
   summary.inputScope =
-    'Each scenario contains 50 events, 100 deliveries and maximum-length identifiers and safe integers. Timestamp precision and field lengths keep this valid workload near 36 KiB; it is not an exactly 64 KiB JSON payload.';
+    'Each saved scenario contains the server maximum of 20 events and 40 deliveries, with maximum-length identifiers and safe integers. These workloads are near 14 KiB, not exactly 64 KiB. Local replay and the CLI separately support 50 events and 100 deliveries.';
   if (values['dry-run']) {
     summary.networkRequests = 0;
     summary.plannedWrites = 7;
@@ -323,18 +332,26 @@ async function verifyMaxPayload() {
 }
 
 async function invalid() {
+  const oversizedSavedCases = [
+    { kind: 'event count', scenario: maximumScenario('mixed', 21, 40) },
+    { kind: 'delivery count', scenario: maximumScenario('mixed', 20, 41) },
+  ];
+  for (const item of oversizedSavedCases) computeLocally(item.scenario);
+  summary.localOnlyCases = oversizedSavedCases.map(({ kind, scenario }) => ({
+    kind,
+    events: scenario.events.length,
+    deliveries: scenario.deliveries.length,
+    localReplayVerified: true,
+  }));
   if (values['dry-run']) {
     summary.networkRequests = 0;
-    summary.plannedWrites = 4;
+    summary.plannedWrites = 7;
     return;
   }
   acceptSession(
     await request('create synthetic session', '/api/session', { method: 'POST', body: {} }),
   );
-  for (const [key, limit] of [
-    ['events', 50],
-    ['deliveries', 100],
-  ]) {
+  for (const key of ['events', 'deliveries']) {
     const scenario = {
       schemaVersion: 1,
       id: 'malformed-array',
@@ -348,25 +365,52 @@ async function invalid() {
       Buffer.byteLength(JSON.stringify(scenario)) < 65_536,
       'Malformed array must remain below the byte limit.',
     );
-    const response = await request(`reject excessive ${key} array`, '/api/runs', {
-      method: 'POST',
-      body: { scenario },
-    });
+    const response = await rejectedSave(`reject excessive ${key} array`, scenario);
     check(
-      response.status === 400 && response.json().error === `${key}: Use at most ${limit} items.`,
-      'Excessive array was not rejected by the collection preflight.',
+      response.status === 413 && response.json().error === SAVED_LIMIT_MESSAGE,
+      'Excessive array was not rejected by the saved collection preflight.',
     );
   }
-  const oversized = await request('reject oversized request', '/api/runs', {
-    method: 'POST',
-    body: { scenario: 'x'.repeat(66_561) },
-  });
+  for (const item of oversizedSavedCases) {
+    const response = await rejectedSave(`reject local-only ${item.kind}`, item.scenario);
+    check(
+      response.status === 413 && response.json().error === SAVED_LIMIT_MESSAGE,
+      'A locally valid scenario above the saved limits was not rejected with local replay guidance.',
+    );
+  }
+  const malformed = maximumScenario('mixed');
+  malformed.events[0] = null;
+  const malformedResponse = await rejectedSave(
+    'reject malformed record within saved limits',
+    malformed,
+  );
+  check(
+    malformedResponse.status === 400 && malformedResponse.json().error?.startsWith('events.0:'),
+    'A malformed record within the saved limits did not return a field validation error.',
+  );
+  const oversized = await rejectedSave('reject oversized request', 'x'.repeat(66_561));
   check(oversized.status === 413, 'Oversized request did not return 413.');
   const runs = await request('malformed input did not save', '/api/runs');
   check(
     runs.status === 200 && runs.json().runs?.length === 0,
     'Malformed input created a saved run.',
   );
+}
+
+async function rejectedSave(label, scenario) {
+  // A regression could unexpectedly save a supposedly invalid scenario. Identify it
+  // for scoped cleanup; never assume a transport failure proves no insertion occurred.
+  summary.unknownSaveOutcome = true;
+  const response = await request(label, '/api/runs', { method: 'POST', body: { scenario } });
+  if (response.status >= 400 && response.status < 500) summary.unknownSaveOutcome = false;
+  if (response.status === 201) {
+    const run = response.json().run;
+    if (uuid.test(run?.id ?? '')) {
+      ownedIds.add(run.id);
+      summary.unknownSaveOutcome = false;
+    }
+  }
+  return response;
 }
 
 async function rateLimit() {

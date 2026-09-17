@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const MAX_SCENARIO_BYTES = 64 * 1024;
 export const MAX_EVENTS = 50;
 export const MAX_DELIVERIES = 100;
+// Saved replays have a smaller compute budget than browser and CLI replays.
+export const MAX_SAVED_EVENTS = 20;
+export const MAX_SAVED_DELIVERIES = 40;
 
 export class ScenarioValidationError extends Error {
   constructor(message: string) {

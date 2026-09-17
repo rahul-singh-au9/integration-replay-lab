@@ -4,9 +4,13 @@ Reviewed 2026-09-17. This is a bounded integration simulator with optional priva
 
 ## Architecture and correctness
 
-The same pure replay engine serves the browser, server and CLI. Validation is centralized, and server runs accept scenarios rather than client-computed decisions. Imported results are ignored. Saved results must match a fresh deterministic computation for the supported engine before display. Unknown engine versions require an explicit compatibility/migration decision, not silent replacement of historical conclusions.
+The same pure replay engine serves the browser, server and CLI. Validation is centralized, and server runs accept scenarios rather than client-computed decisions. Imported results are ignored. New saved runs retain the scenario, engine version and a SHA-256 fingerprint of the canonical result. A fresh deterministic computation must match that fingerprint before display. Legacy full-result records remain supported with exact canonical equality. The digest is an integrity consistency check, not a signature against database administrators. Unknown engine versions require an explicit compatibility/migration decision, not silent replacement of historical conclusions.
+
+Retry scheduling uses a bounded stable minimum heap ordered by virtual time and insertion ordinal. Complete-result fingerprints from the preceding implementation and independent schedule comparisons verify unchanged ordering and results.
 
 The engine distinguishes transport acknowledgement, consumer disposition and simulated side effects. Retry identity and payload remain stable; deduplication does not mean that an unacknowledged request had no effect. Event identity conflicts and contradictory order revisions are separate from transport dead letters. Full snapshots and a virtual clock keep these assumptions explicit.
+
+Server saves are additionally limited to 20 event records and 40 deliveries because measured maximum local workloads lacked reliable Free-plan request CPU headroom. Larger scenarios retain local/CLI replay and export; the interface displays this limit before saving, and the API enforces it before expensive work.
 
 Input bytes, collection lengths, identifiers, numeric values, timestamp precision and references are bounded. Overfull arrays are rejected before per-item validation. Submillisecond timestamps are rejected because truncating them during canonicalization could hide an identity conflict. The CLI reads only regular files, checks bytes while reading and rejects malformed UTF-8; it neither calls external services nor writes to the database.
 

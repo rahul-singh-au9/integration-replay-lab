@@ -243,6 +243,35 @@ try {
       await page.locator('.raw-scenario').scrollIntoViewIfNeeded();
       await hold();
 
+      await chapter('Larger scenarios stay local: 50 snapshots and 100 deliveries');
+      const larger = {
+        schemaVersion: 1,
+        id: 'larger-local-replay',
+        title: 'A larger investigation stays on this device',
+        origin: 'imported',
+        events: Array.from({ length: 50 }, (_, index) => ({
+          ...original,
+          recordId: `large-record-${index}`,
+          eventId: `large-event-${index}`,
+          orderId: `large-order-${index}`,
+        })),
+        deliveries: Array.from({ length: 100 }, (_, index) => ({
+          id: `large-delivery-${index}`,
+          recordId: `large-record-${index % 50}`,
+          atMs: index,
+          fault: 'none',
+        })),
+      };
+      await importValue(page, larger);
+      await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeDisabled();
+      await page.locator('#saved-run-limit').scrollIntoViewIfNeeded();
+      await hold();
+      await runLocally(page);
+      await page.locator('.result-caption').scrollIntoViewIfNeeded();
+      await hold();
+      await download(page);
+      await hold();
+
       await chapter('Server replay: compute, save and survive a reload');
       await importValue(page, examples[2]);
       const created = page.waitForResponse(

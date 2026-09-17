@@ -4,6 +4,8 @@ Reproduce integration failures before connecting a customer system. Import a bou
 
 The first release models **complete order snapshots** and a simulated transport. It does not make network calls to supplied destinations, process payments, or connect to live customer systems. Simulated delays use a virtual clock, so replay is deterministic and finishes immediately.
 
+[Live application](https://integration-replay-lab.rahulsg1508.workers.dev) · [Source](https://github.com/rahul-singh-au9/integration-replay-lab)
+
 The [build journal](docs/BUILD_JOURNAL.md) records implementation decisions and verification. See the [engineering review](docs/ENGINEERING_REVIEW.md) for security, interface and maintenance boundaries.
 
 ## Working scope
@@ -51,7 +53,7 @@ The command prints the computed result as JSON. Exit status is 0 for a completed
 
 ## Architecture and data
 
-React/TypeScript provides the inspection workspace. A shared Zod schema bounds imported scenarios. A pure replay engine drives both the browser's explicit local mode and the Worker's saved mode. D1 stores each validated scenario and its computed result with the engine version, rather than trusting a result uploaded by a client.
+React/TypeScript provides the inspection workspace. A shared Zod schema bounds imported scenarios. A pure replay engine drives both the browser's explicit local mode and the Worker's saved mode. D1 stores each validated scenario, engine version and SHA-256 fingerprint of the canonical server-computed result. Opening a saved run recomputes the result and verifies that fingerprint before returning it. Earlier full-result records remain readable. Client-computed results are never trusted.
 
 ```text
 Scenario → validation → deterministic retry queue
@@ -72,7 +74,7 @@ There are no hosted model dependencies, external connector credentials, third-pa
 
 Saved runs are private to a cryptographically random HttpOnly browser cookie. There are no email accounts or recovery service; clearing the cookie loses access. Export files provide content portability. The hosting provider and deployment operator can access stored data. Remove secrets, customer identifiers and personal data before running a saved scenario.
 
-Each browser can retain 20 runs. Scenario input is limited to 64 KiB, 50 event records and 100 deliveries. Stored replay output is capped at 512 KiB. Global capacity is 500 runs, approximately 281 MiB of maximum scenario/result JSON before database overhead. Runs expire after 30 days and a daily job removes expired rows. Native rate limiting provides approximate per-location write throttling; exact capacity is enforced atomically in SQLite.
+Each browser can retain 20 runs. Scenario input is limited to 64 KiB, 50 event records and 100 deliveries for local/CLI replay. Server saves support up to 20 event records and 40 deliveries to preserve Free-plan CPU headroom; larger scenarios remain available locally and through JSON export. Computed replay output is capped at 512 KiB. New records retain a small result fingerprint envelope instead of repeated attempt JSON. Global capacity is 500 runs, with a conservative 281 MiB payload bound that also accommodates earlier full-result records, before database overhead. Runs expire after 30 days and a daily job removes expired rows. Native rate limiting provides approximate per-location write throttling; exact capacity is enforced atomically in SQLite.
 
 ## Free deployment
 

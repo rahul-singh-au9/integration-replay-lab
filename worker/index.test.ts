@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import worker, { type Env } from './index';
 import { fixtures } from '../src/core/fixtures';
@@ -743,5 +744,249 @@ describe('replay computation failure', () => {
     expect(await response.text()).not.toContain('private engine');
     expect(JSON.stringify(log.mock.calls)).not.toContain('private engine');
     expect(db.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(0);
+  });
+});
+
+describe('compact saved result integrity', () => {
+  function storedEnvelope(id: string): Record<string, unknown> {
+    const row = db.prepare('SELECT result FROM runs WHERE id = ?').get(id);
+    const parsed: unknown = JSON.parse(String(row?.result));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Expected a stored result envelope');
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  it('stores a versioned SHA-256 digest while returning the complete deterministic result', async () => {
+    const cookie = await session();
+    const response = await save(cookie);
+    expect(response.status).toBe(201);
+    const { run } = await response.json<SavedRunResponse>();
+    const canonical = JSON.stringify(replayScenario(run.scenario));
+    const digest = createHash('sha256').update(canonical, 'utf8').digest('hex');
+    const row = db.prepare('SELECT scenario, result FROM runs WHERE id = ?').get(run.id)!;
+    expect(row.scenario).toBe(JSON.stringify(run.scenario));
+    expect(storedEnvelope(run.id)).toEqual({
+      format: 'integration-replay-result-digest',
+      schemaVersion: 1,
+      engineVersion: '1.0.0',
+      sha256: digest,
+    });
+    expect(new TextEncoder().encode(String(row.result)).byteLength).toBe(163);
+    expect(String(row.result)).not.toContain('strategies');
+    expect(JSON.stringify(run.result)).toBe(canonical);
+    const fetched = await request(`/api/runs/${run.id}`, 'GET', cookie);
+    expect(fetched.status).toBe(200);
+    const restored = await fetched.json<SavedRunResponse>();
+    expect(restored.run).toEqual(run);
+    expect(restored.run.result).not.toHaveProperty('sha256');
+  });
+
+  it.each([
+    [
+      'unknown marker',
+      (value: Record<string, unknown>) => {
+        value.format = 'unrecognized';
+      },
+    ],
+    [
+      'unknown envelope version',
+      (value: Record<string, unknown>) => {
+        value.schemaVersion = 2;
+      },
+    ],
+    [
+      'wrong envelope version type',
+      (value: Record<string, unknown>) => {
+        value.schemaVersion = '1';
+      },
+    ],
+    [
+      'unknown engine version',
+      (value: Record<string, unknown>) => {
+        value.engineVersion = '2.0.0';
+      },
+    ],
+    [
+      'wrong digest type',
+      (value: Record<string, unknown>) => {
+        value.sha256 = 123;
+      },
+    ],
+    [
+      'short digest',
+      (value: Record<string, unknown>) => {
+        value.sha256 = 'a'.repeat(63);
+      },
+    ],
+    [
+      'nonhex digest',
+      (value: Record<string, unknown>) => {
+        value.sha256 = 'g'.repeat(64);
+      },
+    ],
+    [
+      'noncanonical uppercase digest',
+      (value: Record<string, unknown>) => {
+        value.sha256 = 'A'.repeat(64);
+      },
+    ],
+    [
+      'mismatched digest',
+      (value: Record<string, unknown>) => {
+        value.sha256 = '0'.repeat(64);
+      },
+    ],
+    [
+      'missing marker',
+      (value: Record<string, unknown>) => {
+        delete value.format;
+      },
+    ],
+    [
+      'unexpected property',
+      (value: Record<string, unknown>) => {
+        value.unverified = true;
+      },
+    ],
+  ])(
+    'rejects an envelope with %s without rewriting or exposing it',
+    async (_description, corrupt) => {
+      const cookie = await session();
+      const { run } = await (await save(cookie)).json<SavedRunResponse>();
+      const envelope = storedEnvelope(run.id);
+      corrupt(envelope);
+      const corrupted = JSON.stringify(envelope);
+      db.prepare('UPDATE runs SET result = ? WHERE id = ?').run(corrupted, run.id);
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const response = await request(`/api/runs/${run.id}`, 'GET', cookie);
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toContain('sha256');
+      expect(JSON.stringify(log.mock.calls)).not.toContain('sha256');
+      expect(db.prepare('SELECT result FROM runs WHERE id = ?').get(run.id)?.result).toBe(
+        corrupted,
+      );
+      expect((await request(`/api/runs/${run.id}`, 'DELETE', cookie)).status).toBe(200);
+    },
+  );
+
+  it.each(['null', '[]', '"text"', '42', '{', ' '.repeat(257)])(
+    'rejects a malformed envelope %j',
+    async (stored) => {
+      const cookie = await session();
+      const { run } = await (await save(cookie)).json<SavedRunResponse>();
+      db.prepare('UPDATE runs SET result = ? WHERE id = ?').run(stored, run.id);
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect((await request(`/api/runs/${run.id}`, 'GET', cookie)).status).toBe(503);
+    },
+  );
+
+  it('accepts equivalent envelope key order while requiring the exact supported fields', async () => {
+    const cookie = await session();
+    const { run } = await (await save(cookie)).json<SavedRunResponse>();
+    const envelope = storedEnvelope(run.id);
+    const reversed = Object.fromEntries(Object.entries(envelope).reverse());
+    db.prepare('UPDATE runs SET result = ? WHERE id = ?').run(JSON.stringify(reversed), run.id);
+    expect((await request(`/api/runs/${run.id}`, 'GET', cookie)).status).toBe(200);
+  });
+
+  it('rejects a changed valid scenario when metadata still matches but its digest does not', async () => {
+    const cookie = await session();
+    const { run } = await (await save(cookie)).json<SavedRunResponse>();
+    const changed = structuredClone(run.scenario);
+    changed.events[0].totalCents++;
+    db.prepare('UPDATE runs SET scenario = ? WHERE id = ?').run(JSON.stringify(changed), run.id);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await request(`/api/runs/${run.id}`, 'GET', cookie)).status).toBe(503);
+  });
+
+  it('continues reading legacy full results without mutating them into digests', async () => {
+    const cookie = await session();
+    const { run } = await (await save(cookie)).json<SavedRunResponse>();
+    const legacy = JSON.stringify(run.result);
+    db.prepare('UPDATE runs SET result = ? WHERE id = ?').run(legacy, run.id);
+    const response = await request(`/api/runs/${run.id}`, 'GET', cookie);
+    expect(response.status).toBe(200);
+    expect((await response.json<SavedRunResponse>()).run).toEqual(run);
+    expect(db.prepare('SELECT result FROM runs WHERE id = ?').get(run.id)?.result).toBe(legacy);
+  });
+});
+
+describe('saved replay compute limits', () => {
+  function scenarioWithCounts(events: number, deliveries: number): Scenario {
+    return {
+      ...fixtures[0].scenario,
+      events: Array.from({ length: events }, (_, index) => ({
+        ...fixtures[0].scenario.events[0],
+        recordId: `record-${index}`,
+        eventId: `event-${index}`,
+        orderId: `order-${index}`,
+      })),
+      deliveries: Array.from({ length: deliveries }, (_, index) => ({
+        id: `delivery-${index}`,
+        recordId: `record-${index % events}`,
+        atMs: 0,
+        fault: 'unavailable',
+      })),
+    };
+  }
+
+  it('saves and reads the exact 20-snapshot/40-delivery boundary with bounded output', async () => {
+    const cookie = await session();
+    const scenario = scenarioWithCounts(20, 40);
+    const response = await request('/api/runs', 'POST', cookie, { scenario });
+    expect(response.status).toBe(201);
+    const { run } = await response.json<SavedRunResponse>();
+    expect(run.scenario).toEqual(scenario);
+    expect(run.result).toEqual(replayScenario(scenario));
+    expect(new TextEncoder().encode(JSON.stringify(run.result)).byteLength).toBeLessThanOrEqual(
+      512 * 1024,
+    );
+    expect(run.result.strategies.every((strategy) => strategy.metrics.attempts === 120)).toBe(true);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(1);
+    const restored = await request(`/api/runs/${run.id}`, 'GET', cookie);
+    expect(restored.status).toBe(200);
+    expect((await restored.json<SavedRunResponse>()).run).toEqual(run);
+  });
+
+  it.each([
+    [21, 40],
+    [20, 41],
+    [50, 100],
+  ])(
+    'rejects %i snapshots/%i deliveries before replay or storage, while local replay remains valid',
+    async (events, deliveries) => {
+      const cookie = await session();
+      const scenario = scenarioWithCounts(events, deliveries);
+      expect(replayScenario(scenario).scenarioId).toBe(scenario.id);
+      const engine = vi.spyOn(replayEngine, 'createReplay');
+      const storage = vi.spyOn(env.DB, 'prepare');
+      const response = await request('/api/runs', 'POST', cookie, { scenario });
+      expect(response.status).toBe(413);
+      expect((await response.json<{ error: string }>()).error).toBe(
+        'Saved replays support at most 20 snapshots and 40 deliveries. Run larger scenarios locally.',
+      );
+      expect(engine).not.toHaveBeenCalled();
+      expect(storage).not.toHaveBeenCalled();
+      expect(db.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(0);
+    },
+  );
+
+  it('keeps full-sized legacy saved runs readable', async () => {
+    const cookie = await session();
+    const { run } = await (await save(cookie)).json<SavedRunResponse>();
+    const scenario = scenarioWithCounts(50, 100);
+    const result = replayScenario(scenario);
+    db.prepare('UPDATE runs SET event_count = ?, scenario = ?, result = ? WHERE id = ?').run(
+      50,
+      JSON.stringify(scenario),
+      JSON.stringify(result),
+      run.id,
+    );
+    const response = await request(`/api/runs/${run.id}`, 'GET', cookie);
+    expect(response.status).toBe(200);
+    const restored = await response.json<SavedRunResponse>();
+    expect(restored.run.scenario).toEqual(scenario);
+    expect(restored.run.result).toEqual(result);
   });
 });

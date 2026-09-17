@@ -36,6 +36,7 @@ const rehearsalVersion = `recovery-${randomBytes(8).toString('hex')}`;
 const commandEnv = { ...process.env, CI: '1', WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' };
 let worker;
 let workerOutput = '';
+let workerLogFilename = 'worker.log';
 
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const sqlLiteral = (value) => `'${String(value).replaceAll("'", "''")}'`;
@@ -190,7 +191,72 @@ async function stopWorker() {
       await Promise.race([closed, pause(3_000)]);
     }
   }
-  await writeFile(path.join(root, 'worker.log'), workerOutput, { mode: 0o600 });
+  await writeFile(path.join(root, workerLogFilename), workerOutput, { mode: 0o600 });
+  worker = undefined;
+}
+
+async function startWorker(configuration, label, logFilename) {
+  const args = [
+    wrangler,
+    'dev',
+    '--local',
+    '--config',
+    configuration,
+    '--ip',
+    '127.0.0.1',
+    '--port',
+    String(port),
+    '--inspector-port',
+    '0',
+    '--test-scheduled',
+  ];
+  manifest.commands.push({
+    label,
+    executable: process.execPath,
+    args,
+    cwd: project,
+  });
+  console.log(`${manifest.commands.length}. ${label} on port ${port}`);
+  workerOutput = '';
+  workerLogFilename = logFilename;
+  worker = spawn(process.execPath, args, {
+    cwd: project,
+    env: commandEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  worker.stdout.on('data', (chunk) => {
+    workerOutput += chunk;
+  });
+  worker.stderr.on('data', (chunk) => {
+    workerOutput += chunk;
+  });
+  let startupError;
+  worker.once('error', (error) => {
+    startupError = error;
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  let healthy = false;
+  while (Date.now() < deadline) {
+    if (startupError) throw startupError;
+    assert.equal(worker.exitCode, null, 'The isolated Worker exited before becoming healthy.');
+    try {
+      const response = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1_000) });
+      if (response.ok) {
+        manifest.checks.health = await response.json();
+        if (manifest.checks.health.version === rehearsalVersion) {
+          healthy = true;
+          break;
+        }
+      }
+    } catch {
+      /* The local process may still be starting. */
+    }
+    await pause(200);
+  }
+  assert(healthy, 'The isolated local Worker must become healthy.');
+  assert.equal(manifest.checks.health.ok, true);
+  return manifest.checks.health;
 }
 
 try {
@@ -269,13 +335,63 @@ try {
     sourceConfig,
     insert(expiredId, now - 86_400_000) + insert(retainedId, now + 86_400_000),
   );
+  manifest.checks.sourceHealth = await startWorker(
+    sourceConfig,
+    'Create a digest-backed run through the actual isolated source Worker',
+    'source-worker.log',
+  );
+  const sourceBase = `http://127.0.0.1:${port}`;
+  const digestResponse = await fetch(`${sourceBase}/api/runs`, {
+    method: 'POST',
+    headers: {
+      Cookie: `irl_session=${sessionToken}`,
+      Origin: sourceBase,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ scenario }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(digestResponse.status, 201, 'The actual Worker must create the digest-backed run.');
+  const digestRun = (await digestResponse.json()).run;
+  assert.match(
+    digestRun.id,
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+  );
+  assert.deepEqual(digestRun.scenario, scenario);
+  assert.deepEqual(digestRun.result, replay);
+  const digestId = digestRun.id;
+  await stopWorker();
+  const digestStored = await query(
+    'Verify the Worker stored a versioned canonical-result digest for the correct owner',
+    sourceConfig,
+    `SELECT owner_id, scenario, result FROM runs WHERE id = ${sqlLiteral(digestId)};`,
+  );
+  assert.equal(digestStored[0].results.length, 1);
+  const digestRow = digestStored[0].results[0];
+  assert.equal(digestRow.owner_id, owner);
+  assert.deepEqual(JSON.parse(digestRow.scenario), scenario);
+  const digestEnvelope = JSON.parse(digestRow.result);
+  assert.deepEqual(digestEnvelope, {
+    format: 'integration-replay-result-digest',
+    schemaVersion: 1,
+    engineVersion: replay.engineVersion,
+    sha256: createHash('sha256').update(JSON.stringify(replay)).digest('hex'),
+  });
+  manifest.checks.digestCreation = {
+    status: digestResponse.status,
+    id: digestId,
+    format: digestEnvelope.format,
+    storedResultBytes: Buffer.byteLength(digestRow.result),
+    verifiedCanonicalDigest: true,
+    verifiedOwner: true,
+  };
   manifest.checks.source = await snapshot(
     'Verify source schema, counter, migration history and integrity',
     sourceConfig,
   );
   assert.deepEqual(manifest.checks.source.counts, {
-    actual_runs: 2,
-    recorded_runs: 2,
+    actual_runs: 3,
+    recorded_runs: 3,
     expired_runs: 1,
   });
   const backup = path.join(root, 'backup.sql');
@@ -324,7 +440,7 @@ try {
     restoreConfig,
     'SELECT run_count FROM capacity WHERE id = 1;',
   );
-  assert.equal(inserted[0].results[0].run_count, 3);
+  assert.equal(inserted[0].results[0].run_count, 4);
   await query(
     'Exercise the restored deletion trigger',
     restoreConfig,
@@ -335,8 +451,8 @@ try {
     restoreConfig,
   );
   assert.deepEqual(manifest.checks.triggers.counts, {
-    actual_runs: 2,
-    recorded_runs: 2,
+    actual_runs: 3,
+    recorded_runs: 3,
     expired_runs: 1,
   });
   for (const [label, sql] of [
@@ -366,88 +482,47 @@ try {
     restoreConfig,
   );
   assert.deepEqual(manifest.checks.byteBounds, manifest.checks.triggers);
-  const args = [
-    wrangler,
-    'dev',
-    '--local',
-    '--config',
+  manifest.checks.restoredHealth = await startWorker(
     restoreConfig,
-    '--ip',
-    '127.0.0.1',
-    '--port',
-    String(port),
-    '--inspector-port',
-    '0',
-    '--test-scheduled',
-  ];
-  manifest.commands.push({
-    label: 'Serve the restored local database and invoke the actual scheduled handler',
-    executable: process.execPath,
-    args,
-    cwd: project,
-  });
-  console.log(`${manifest.commands.length}. Start the restored local Worker on port ${port}`);
-  worker = spawn(process.execPath, args, {
-    cwd: project,
-    env: commandEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  worker.stdout.on('data', (chunk) => {
-    workerOutput += chunk;
-  });
-  worker.stderr.on('data', (chunk) => {
-    workerOutput += chunk;
-  });
-  let startupError;
-  worker.once('error', (error) => {
-    startupError = error;
-  });
+    'Serve the restored local database and invoke the actual scheduled handler',
+    'restored-worker.log',
+  );
   const base = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 30_000;
-  let healthy = false;
-  while (Date.now() < deadline) {
-    if (startupError) throw startupError;
-    assert.equal(worker.exitCode, null, 'The isolated Worker exited before becoming healthy.');
-    try {
-      const response = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1_000) });
-      if (response.ok) {
-        manifest.checks.health = await response.json();
-        if (manifest.checks.health.version === rehearsalVersion) {
-          healthy = true;
-          break;
-        }
-      }
-    } catch {
-      /* The local process may still be starting. */
-    }
-    await pause(200);
-  }
-  assert(healthy, 'The restored local Worker must become healthy.');
-  assert.equal(manifest.checks.health.ok, true);
   const workspaceHeaders = { Cookie: `irl_session=${sessionToken}` };
-  const retainedResponse = await fetch(`${base}/api/runs/${retainedId}`, {
-    headers: workspaceHeaders,
-    signal: AbortSignal.timeout(10_000),
-  });
-  assert.equal(retainedResponse.status, 200);
-  const retainedRun = (await retainedResponse.json()).run;
-  assert.deepEqual(retainedRun.scenario, scenario);
-  assert.deepEqual(retainedRun.result, replay);
+  const restoredReads = [];
+  for (const [format, id] of [
+    ['legacy-full-result', retainedId],
+    ['result-digest', digestId],
+  ]) {
+    const retainedResponse = await fetch(`${base}/api/runs/${id}`, {
+      headers: workspaceHeaders,
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(retainedResponse.status, 200, `${format} must remain readable after restore.`);
+    const retainedRun = (await retainedResponse.json()).run;
+    assert.deepEqual(retainedRun.scenario, scenario);
+    assert.deepEqual(retainedRun.result, replay);
+    const foreignResponse = await fetch(`${base}/api/runs/${id}`, {
+      headers: { Cookie: `irl_session=${randomBytes(32).toString('hex')}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(foreignResponse.status, 404);
+    restoredReads.push({
+      format,
+      id,
+      ownerRead: retainedResponse.status,
+      foreignRead: foreignResponse.status,
+    });
+  }
   const expiredResponse = await fetch(`${base}/api/runs/${expiredId}`, {
     headers: workspaceHeaders,
     signal: AbortSignal.timeout(10_000),
   });
   assert.equal(expiredResponse.status, 404);
-  const foreignResponse = await fetch(`${base}/api/runs/${retainedId}`, {
-    headers: { Cookie: `irl_session=${randomBytes(32).toString('hex')}` },
-    signal: AbortSignal.timeout(10_000),
-  });
-  assert.equal(foreignResponse.status, 404);
   manifest.checks.restoredApi = {
-    verifiedScenarioAndResult: true,
-    ownerRead: retainedResponse.status,
+    verifiedScenarioAndResultForBothFormats: true,
+    formats: restoredReads,
     expiredRead: expiredResponse.status,
-    foreignRead: foreignResponse.status,
   };
   for (let attempt = 0; attempt < 2; attempt++) {
     const response = await fetch(`${base}/__scheduled?cron=${encodeURIComponent('17 3 * * *')}`, {
@@ -464,16 +539,27 @@ try {
     restoreConfig,
   );
   assert.deepEqual(manifest.checks.afterCleanup.counts, {
-    actual_runs: 1,
-    recorded_runs: 1,
+    actual_runs: 2,
+    recorded_runs: 2,
     expired_runs: 0,
   });
   const survivor = await query(
-    'Verify cleanup preserved only the unexpired run',
+    'Verify cleanup preserved both unexpired storage formats',
     restoreConfig,
-    'SELECT id FROM runs;',
+    'SELECT id, result FROM runs ORDER BY id;',
   );
-  assert.deepEqual(survivor[0].results, [{ id: retainedId }]);
+  assert.deepEqual(
+    survivor[0].results,
+    [
+      { id: retainedId, result: JSON.stringify(replay) },
+      { id: digestId, result: digestRow.result },
+    ].sort((a, b) => a.id.localeCompare(b.id)),
+  );
+  manifest.checks.preservedStorageFormats = {
+    legacyFullResultUnchanged: true,
+    digestEnvelopeUnchanged: true,
+    ownedUnexpiredRuns: 2,
+  };
   manifest.checks.sourceUnchanged = await snapshot(
     'Verify the isolated export source was unchanged',
     sourceConfig,
