@@ -518,6 +518,8 @@ test('scenarios beyond saved-run limits still replay and export locally without 
       .getByRole('button', { name: 'Import scenario', exact: true })
       .click();
     await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeDisabled();
+    await expect(page.locator('.notice-info')).toContainText('Run locally and export');
+    await expect(page.locator('.notice-info')).not.toContainText('Choose Run and save');
     await expect(page.locator('#saved-run-limit')).toContainText(
       `Saved runs support up to ${MAX_SAVED_EVENTS} snapshots and ${MAX_SAVED_DELIVERIES} deliveries`,
     );
@@ -539,4 +541,15 @@ test('scenarios beyond saved-run limits still replay and export locally without 
   await page.locator('.scenario-nav').getByRole('button').first().click();
   await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeEnabled();
   await expect(page.locator('#saved-run-limit')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Import scenario', exact: true }).click();
+  await page
+    .getByLabel('Scenario JSON', { exact: true })
+    .fill(JSON.stringify(fixtures[0].scenario));
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Import scenario', exact: true })
+    .click();
+  await expect(page.locator('.notice-info')).toContainText('Choose Run and save');
+  await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeEnabled();
+  expect(uploads).toEqual([]);
 });

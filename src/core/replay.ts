@@ -149,31 +149,46 @@ class AttemptQueue {
 
 type Disposition = { decision: Exclude<ConsumerDecision, 'not-received'>; reason: string };
 
+interface PreparedRecord {
+  event: OrderEvent;
+  occurredAt?: string;
+  fingerprint?: string;
+}
+
+function canonicalTimestamp(record: PreparedRecord): string {
+  return (record.occurredAt ??= new Date(record.event.occurredAt).toISOString());
+}
+
 /** Fixed field order gives semantic equality without a collision-prone short hash. */
-function fingerprint(event: OrderEvent): string {
-  return JSON.stringify([
+function fingerprint(record: PreparedRecord): string {
+  const { event } = record;
+  return (record.fingerprint ??= JSON.stringify([
     event.orderId,
     event.revision,
     event.status,
     event.totalCents,
-    new Date(event.occurredAt).toISOString(),
-  ]);
+    canonicalTimestamp(record),
+  ]));
 }
 
-function snapshot(event: OrderEvent): OrderSnapshot {
+function snapshot(record: PreparedRecord): OrderSnapshot {
+  const { event } = record;
   return {
     orderId: event.orderId,
     revision: event.revision,
     status: event.status,
     totalCents: event.totalCents,
-    occurredAt: new Date(event.occurredAt).toISOString(),
+    occurredAt: canonicalTimestamp(record),
     eventId: event.eventId,
     recordId: event.recordId,
   };
 }
 
-function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
-  const records = new Map(scenario.events.map((event) => [event.recordId, event]));
+function runStrategy(
+  scenario: Scenario,
+  strategy: StrategyId,
+  records: ReadonlyMap<string, PreparedRecord>,
+): StrategyResult {
   const orders = new Map<string, OrderSnapshot>();
   const seenEvents = new Map<string, string>();
   const seenRevisions = new Map<string, Map<number, string>>();
@@ -202,9 +217,10 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
   );
   let nextOrdinal = queue.length;
 
-  function consume(event: OrderEvent, scheduled: ScheduledAttempt): Disposition {
+  function consume(record: PreparedRecord, scheduled: ScheduledAttempt): Disposition {
+    const { event } = record;
     if (strategy === 'robust') {
-      const content = fingerprint(event);
+      const content = fingerprint(record);
       const knownEvent = seenEvents.get(event.eventId);
       if (knownEvent !== undefined && knownEvent !== content) {
         return {
@@ -246,7 +262,7 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
       }
     }
 
-    orders.set(event.orderId, snapshot(event));
+    orders.set(event.orderId, snapshot(record));
     const effectKey = JSON.stringify([event.orderId, event.revision]);
     if (effectKeys.has(effectKey)) metrics.duplicateEffects++;
     effectKeys.add(effectKey);
@@ -270,7 +286,8 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
 
   while (queue.length) {
     const scheduled = queue.shift()!;
-    const event = records.get(scheduled.delivery.recordId)!;
+    const record = records.get(scheduled.delivery.recordId)!;
+    const { event } = record;
     const fault = scheduled.delivery.fault;
     const transport: TransportOutcome =
       fault === 'unavailable'
@@ -289,7 +306,7 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
       };
     } else {
       metrics.received++;
-      disposition = consume(event, scheduled);
+      disposition = consume(record, scheduled);
       if (disposition.decision === 'applied') metrics.applied++;
       else if (disposition.decision === 'duplicate') metrics.duplicates++;
       else if (disposition.decision === 'stale') metrics.stale++;
@@ -350,6 +367,14 @@ function runStrategy(scenario: Scenario, strategy: StrategyId): StrategyResult {
 /** Validates once and returns both the accepted input and its computed replay. */
 export function createReplay(input: unknown): { scenario: Scenario; result: ReplayResult } {
   const scenario = parseScenario(input);
+  // Only immutable canonical strings are reused within this replay. Consumer state
+  // and returned snapshots remain independent; no scenario data survives in a global cache.
+  const records = new Map<string, PreparedRecord>(
+    scenario.events.map((event) => [
+      event.recordId,
+      { event, occurredAt: undefined, fingerprint: undefined },
+    ]),
+  );
   const result: ReplayResult = {
     schemaVersion: 1,
     engineVersion: '1.0.0',
@@ -357,7 +382,7 @@ export function createReplay(input: unknown): { scenario: Scenario; result: Repl
     scenarioTitle: scenario.title,
     origin: scenario.origin,
     mode: 'simulation',
-    strategies: [runStrategy(scenario, 'naive'), runStrategy(scenario, 'robust')],
+    strategies: [runStrategy(scenario, 'naive', records), runStrategy(scenario, 'robust', records)],
     warnings: [
       'This is a deterministic delivery simulation. It makes no outbound requests and generates no real business effects.',
       'Events are complete order snapshots. Higher revisions may skip gaps; this model is not safe for deltas or missing incremental updates.',

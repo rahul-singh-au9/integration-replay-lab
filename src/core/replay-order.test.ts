@@ -113,3 +113,26 @@ it('matches an independent sorted schedule for every original and retried delive
     }
   }
 });
+
+it('keeps canonical values local to a replay and returned strategy snapshots independent', () => {
+  const scenario = structuredClone(fixtures[0].scenario);
+  const first = replayScenario(scenario);
+  const naive = first.strategies[0].finalOrders[0];
+  const guarded = first.strategies[1].finalOrders[0];
+  expect(naive).toEqual(guarded);
+  expect(naive).not.toBe(guarded);
+  naive.occurredAt = 'changed by a caller';
+  expect(guarded.occurredAt).toBe('2026-02-10T10:01:00.000Z');
+
+  scenario.events[0].occurredAt = '2026-09-17T01:23:45.123+01:00';
+  scenario.events[0].totalCents = 1;
+  const second = replayScenario(scenario);
+  for (const strategy of second.strategies) {
+    expect(strategy.finalOrders[0]).toMatchObject({
+      occurredAt: '2026-09-17T00:23:45.123Z',
+      totalCents: 1,
+    });
+  }
+  expect(guarded.totalCents).toBe(12900);
+  expect(scenario.events[0].occurredAt).toBe('2026-09-17T01:23:45.123+01:00');
+});

@@ -98,3 +98,25 @@ Server saves now support 20 event records and 40 deliveries. The browser and CLI
 The updated local release passed 157 core/API/client/import tests, nine CLI process tests and 42 browser journeys across three engines without retries. The additional browser journey proves that larger scenarios remain usable locally and exportable without sending a prohibited save. The restored database check now includes both new fingerprint and legacy full-result representations.
 
 Version `b8d57adb-6cc5-47be-a4aa-e59e399bd461` deployed with 51 ms startup. All three actual server-maximum scenarios saved and reopened with full CLI-equivalent results, then their owned records were removed. CPU observations were 4–9 ms for five replay/read requests and 17 ms for one save. No provider CPU error occurred, but the stricter every-request 10 ms target remains unproven. This observation is preserved in the verification record.
+
+## 12. Confirm scheduled retention and public journeys
+
+The actual Cloudflare scheduler removed the expired synthetic record and preserved the active record. The daily 03:17 UTC schedule was restored and both verification records were removed. This confirms remote scheduling in addition to the isolated local handler and recovery checks.
+
+All 42 public browser journeys passed without retries across Chromium, Firefox and WebKit. Real server journeys verified persistence, ownership and deletion; injected-error journeys remained explicitly controlled. The published source revision `4f416d6` also passed hosted CI with 157 unit/API/client/import tests, nine CLI checks and 42 browser journeys.
+
+## 13. Polish the final interface and measured computation
+
+The import success message now tells larger-scenario users to run locally and export, matching the disabled save action. Both the larger and within-limit messages have browser regressions. The complete videos were refreshed to show this final text.
+
+Within each replay, timestamp normalization and semantic fingerprints now reuse primitive strings per record. Consumer state and returned objects remain independent; nothing is cached across user replays. The 20/40 timeout case uses 20 timestamp conversions instead of 180, with identical complete results. The additional mutation-isolation regression brings the focused test count to 158.
+
+Version `c8d81461-7fe0-43e3-96c8-603b9c6d419c` deployed with 67 ms startup. Three actual maximum saved scenarios returned full CLI-equivalent results and were cleaned up. Observed CPU still varied from 4 to 20 ms, so strict 10 ms headroom is not claimed. Current performance limits and fallback behavior remain explicit in the release record. Actual malformed-input and rate-limit checks passed without leaving saved records.
+
+## 14. Finish release evidence and handoff
+
+The final imported-limit flow passed focused checks in all three public browser engines. Updated desktop (2:42) and mobile (0:37) MP4 recordings passed full decoding, playback, seeking and visual inspection, including the corrected larger-scenario guidance. Original browser recordings and chapter data remain alongside the playable files.
+
+Public health, response-header, anonymous-access, cross-origin and route/method checks passed. Invalid input and server-limit violations produced expected 400/413 responses and no stored run. Native throttling produced 429 with Retry-After: 60; after the cooldown, three maximum saved scenarios again created, reopened and deleted successfully. Cleanup was limited to owned synthetic data. A 17 ms CPU observation in that recovery round remains disclosed.
+
+The final source, operations guide, verification record and this journal are published together. The main branch verification workflow runs the final 158 focused tests, nine CLI checks and 42 local browser journeys. The public deployment, source repository, local videos and build record are the handoff artifacts.

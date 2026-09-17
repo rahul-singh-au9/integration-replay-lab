@@ -691,7 +691,10 @@ export default function App() {
       setJson('');
       setNotice({
         kind: 'info',
-        text: 'Scenario loaded on this device. Any imported result was ignored. Choose Run and save to compute and save, or Run locally to keep it on this device.',
+        text:
+          next.events.length > MAX_SAVED_EVENTS || next.deliveries.length > MAX_SAVED_DELIVERIES
+            ? 'Scenario loaded on this device. Any imported result was ignored. This scenario exceeds saved replay limits. Run locally and export the result, or reduce its size to save it.'
+            : 'Scenario loaded on this device. Any imported result was ignored. Choose Run and save to compute and save, or Run locally to keep it on this device.',
       });
     } catch (error) {
       setImportError(errorMessage(error));

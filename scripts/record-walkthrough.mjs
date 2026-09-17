@@ -263,6 +263,7 @@ try {
         })),
       };
       await importValue(page, larger);
+      await expect(page.locator('.notice-info')).toContainText('Run locally and export');
       await expect(page.getByRole('button', { name: 'Run and save', exact: true })).toBeDisabled();
       await page.locator('#saved-run-limit').scrollIntoViewIfNeeded();
       await hold();
