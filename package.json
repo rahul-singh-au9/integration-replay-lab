@@ -1,0 +1,43 @@
+{
+  "name": "integration-replay-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.13.0 <25"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "preview": "wrangler dev --ip 127.0.0.1 --port 8790 --local",
+    "db:migrate:local": "wrangler d1 migrations apply integration-replay-lab --local",
+    "db:migrate:remote": "wrangler d1 migrations apply integration-replay-lab --remote",
+    "deploy": "npm run build && wrangler deploy",
+    "check": "npm run typecheck && npm test && npm run build && npm run build:cli && npm run test:cli",
+    "build:cli": "vite build --ssr src/cli.ts --outDir dist-cli",
+    "replay": "node dist-cli/cli.js",
+    "test:cli": "node --test tests/cli.test.mjs",
+    "audit:dependencies": "npm audit --audit-level=high"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@cloudflare/workers-types": "5.20260917.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vitest": "5.0.1",
+    "wrangler": "4.133.0"
+  }
+}
